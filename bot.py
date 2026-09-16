@@ -1957,7 +1957,7 @@ def process_number(uid, cid, phone, reply_to=None):
         bot.send_message(cid,
             f"❌ <b>{fancy('invalid number')}</b>\n\n"
             f"ᴘʟᴇᴀꜱᴇ ꜱᴇɴᴅ ᴀ ᴠᴀʟɪᴅ 10-ᴅɪɢɪᴛ ɪɴᴅɪᴀɴ ᴍᴏʙɪʟᴇ ɴᴜᴍʙᴇʀ.\n"
-            f"ᴇx: <code>8757136664</code>",
+            f"ᴇx: <code>9876543210</code>",
             parse_mode='HTML', reply_to_message_id=reply_to)
         return
     phone = clean
@@ -2368,9 +2368,9 @@ def process_menu(uid, cid, text, reply_to=None):
         states[uid] = {'state': 'awaiting_number'}
         bot.send_message(cid, f"📱 <b>{fancy('send number')}</b>\n\n"
             f"ꜱᴜᴘᴘᴏʀᴛᴇᴅ ꜰᴏʀᴍᴀᴛꜱ:\n"
-            f"• <code>8757136664</code>\n"
-            f"• <code>+918757136665</code>\n"
-            f"• <code>87571 36664</code>\n\n"
+            f"• <code>9876543210</code>\n"
+            f"• <code>+919876543210</code>\n"
+            f"• <code>98765 43210</code>\n\n"
             f"ᴄᴏꜱᴛ: {get_setting('search_cost',5)}ᴄʀ",
             parse_mode='HTML', reply_to_message_id=reply_to)
     elif text == "🔒 Username To Info":
