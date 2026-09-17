@@ -1,11 +1,12 @@
 """
 ================================================================
-  Num Info Bot — v24 SUPER ADMIN EDITION
-  ✅ Aadhaar API FIXED (GET ?q= format)
-  ✅ Vehicle Info ADDED (RC lookup)
-  ✅ Admin Panel API change FIXED (live DB values)
-  ✅ 25+ Admin Features
-  ✅ Welcome bonus = 15 credits
+  Num Info Bot — v25 FINAL
+  ✅ Group me result + 1hr auto-delete
+  ✅ Private channel join request: NO auto-approve (admin manual)
+  ✅ User gets access after request (private channels skipped)
+  ✅ Welcome bonus = 30 credits
+  ✅ Aadhaar + Vehicle Info
+  ✅ Username/TG ID button-only flow
 ================================================================
 """
 
@@ -89,7 +90,7 @@ VEHICLE_URL       = env("VEHICLE_URL", "https://rc-x.paskhinpf9.workers.dev/")
 VEHICLE_KEY       = env("VEHICLE_KEY", "")
 VEHICLE_COST      = int(env("VEHICLE_COST", "10"))
 
-WELCOME_BONUS     = int(env("WELCOME_BONUS", "15"))
+WELCOME_BONUS     = int(env("WELCOME_BONUS", "30"))   # ⭐ 30 credits
 REFERRAL_BONUS    = int(env("REFERRAL_BONUS", "10"))
 DAILY_TRIES       = int(env("DAILY_TRIES", "0"))
 
@@ -120,6 +121,7 @@ WELCOME_EMOJIS = ["🌟","🚀","💫","🌈","🔥","⚡","🎯","💎","🌸",
 ORDER_LIFETIME = 300
 CACHE_MAX_AGE_DAYS = 30
 MSG_SAFE_LIMIT = 3800
+GROUP_AUTO_DELETE_SECONDS = 3600   # ⭐ 1 hour
 
 if not BOT_TOKEN: logger.critical("❌ BOT_TOKEN missing"); sys.exit(1)
 if not MONGO_URI: logger.critical("❌ MONGO_URI missing"); sys.exit(1)
@@ -198,6 +200,7 @@ def init_db():
         "group_enabled": 1,
         "group_welcome": "👋 Bot added! Type /start to begin.",
         "group_auto_delete": 1,
+        "group_auto_delete_seconds": GROUP_AUTO_DELETE_SECONDS,
         "broadcast_pin": 0,
         "broadcast_forward": 0,
         "welcome_emoji": "",
@@ -321,17 +324,6 @@ def get_tries_remaining(uid):
             used = 0
         return max(0, limit - used)
     except: return limit
-
-def check_try_available(uid):
-    if is_admin_user(uid): return True
-    limit = int(get_setting("daily_tries", DAILY_TRIES))
-    if limit <= 0: return True
-    try:
-        u = get_or_create_user(uid)
-        used = int(u.get("tries_used", 0))
-        if u.get("tries_date") != today_str(): return True
-        return used < limit
-    except: return True
 
 def consume_try(uid):
     if is_admin_user(uid): return True
@@ -605,7 +597,6 @@ def query_number(phone):
     except Exception as e: return False, None, str(e)
 
 def query_aadhaar(aadhaar):
-    """⭐ FIXED: New apihitech API uses GET ?q= format"""
     a_url = get_setting("aadhaar_url_env", AADHAAR_URL) or "https://apihitech.vercel.app/search?q="
     a_key = get_setting("aadhaar_key_env", AADHAAR_KEY)
     if not a_url: return False, None, "Aadhaar URL not configured"
@@ -650,7 +641,6 @@ def query_aadhaar(aadhaar):
     except Exception as e: return False, None, str(e)
 
 def query_vehicle(vehicle):
-    """⭐ NEW: Vehicle RC lookup"""
     v_url = get_setting("vehicle_url_env", VEHICLE_URL) or "https://rc-x.paskhinpf9.workers.dev/"
     v_key = get_setting("vehicle_key_env", VEHICLE_KEY)
     if not v_url: return False, None, "Vehicle URL not configured"
@@ -1191,7 +1181,6 @@ def extract_phone_digits(text):
     return None
 
 def is_vehicle_number(text):
-    """⭐ NEW: check if text looks like Indian vehicle plate"""
     if not text: return False
     v = re.sub(r'[\s\-]', '', str(text)).upper()
     return bool(re.match(r'^[A-Z]{2}[0-9]{1,2}[A-Z]{1,3}[0-9]{4}$', v))
@@ -1201,7 +1190,6 @@ def classify_input(text):
     t = text.strip()
     if not t: return None, None
 
-    # t.me / telegram.me
     if "t.me/" in t or "telegram.me/" in t:
         part = t.split("t.me/")[-1] if "t.me/" in t else t.split("telegram.me/")[-1]
         part = part.split("?")[0].strip("/")
@@ -1211,14 +1199,12 @@ def classify_input(text):
         if part.isdigit(): return "tgid", part
         return "username", part
 
-    # @username
     if t.startswith("@"):
         u = t[1:].strip()
         if 5 <= len(u) <= 32 and re.match(r'^[a-zA-Z][a-zA-Z0-9_]*$', u):
             return "username", u
         return None, None
 
-    # Pure digits
     if t.isdigit():
         phone = extract_phone_digits(t)
         if phone: return "number", phone
@@ -1226,7 +1212,6 @@ def classify_input(text):
         if 5 <= len(t) <= 15: return "tgid", t
         return None, None
 
-    # +<digits> — always phone
     if t.startswith("+"):
         phone = extract_phone_digits(t)
         if phone: return "number", phone
@@ -1234,11 +1219,9 @@ def classify_input(text):
         if 5 <= len(d) <= 15: return "tgid", d
         return None, None
 
-    # ⭐ VEHICLE NUMBER (e.g., JH15U4500)
     if is_vehicle_number(t):
         return "vehicle", re.sub(r'[\s\-]', '', t).upper()
 
-    # space/dash separated — phone or vehicle
     if re.match(r'^[\+\d\s\-\(\)]+$', t):
         phone = extract_phone_digits(t)
         if phone: return "number", phone
@@ -1246,7 +1229,6 @@ def classify_input(text):
         if 5 <= len(d) <= 15: return "tgid", d
         return None, None
 
-    # plain username
     if re.match(r'^[a-zA-Z][a-zA-Z0-9_]{4,31}$', t):
         return "username", t
 
@@ -1256,6 +1238,9 @@ def is_maintenance(): return int(get_setting("maintenance_mode", 0)) == 1
 def referral_enabled(): return int(get_setting("referral_enabled", 1)) == 1
 def group_enabled(): return int(get_setting("group_enabled", 1)) == 1
 def group_auto_delete(): return int(get_setting("group_auto_delete", 1)) == 1
+def group_auto_delete_seconds():
+    try: return int(get_setting("group_auto_delete_seconds", GROUP_AUTO_DELETE_SECONDS))
+    except: return GROUP_AUTO_DELETE_SECONDS
 
 def normalize_phone(num, cc=None):
     if not num: return None
@@ -1290,7 +1275,6 @@ _FIELD_ALIASES = {
     "tg_id": ("tg_id","telegram_id","user_id"),
     "country": ("country","nation"),
     "country_code": ("country_code","cc","code"),
-    # Vehicle fields
     "vehicle_number": ("vehicle_number","reg_no","registration_number","vehicle","v_number"),
     "owner_name": ("owner_name","owner","name"),
     "chassis": ("chassis","chassis_no","chassis_number"),
@@ -1345,38 +1329,18 @@ def record_to_json_dict(rec):
     if not isinstance(rec, dict): return {}
     out = {}
     mapping = [
-        ("name", "name"),
-        ("father", "father_name"),
-        ("address", "address"),
-        ("village", "village"),
-        ("district", "district"),
-        ("state", "state"),
-        ("pincode", "pincode"),
-        ("aadhaar", "aadhaar"),
-        ("dob", "dob"),
-        ("gender", "gender"),
-        ("alt", "alternate_number"),
-        ("circle", "circle"),
-        ("email", "email"),
-        ("num", "number"),
-        ("tg_id", "tg_id"),
-        ("country", "country"),
-        ("country_code", "country_code"),
-        # Vehicle
-        ("vehicle_number", "vehicle_number"),
-        ("owner_name", "owner_name"),
-        ("chassis", "chassis_number"),
-        ("engine", "engine_number"),
-        ("fuel", "fuel_type"),
-        ("vehicle_class", "vehicle_class"),
-        ("maker", "maker"),
-        ("model", "model"),
-        ("reg_date", "registration_date"),
-        ("insurance", "insurance"),
-        ("fitness", "fitness_upto"),
-        ("puc", "puc_upto"),
-        ("rto", "rto"),
-        ("financer", "financer"),
+        ("name", "name"), ("father", "father_name"), ("address", "address"),
+        ("village", "village"), ("district", "district"), ("state", "state"),
+        ("pincode", "pincode"), ("aadhaar", "aadhaar"), ("dob", "dob"),
+        ("gender", "gender"), ("alt", "alternate_number"), ("circle", "circle"),
+        ("email", "email"), ("num", "number"), ("tg_id", "tg_id"),
+        ("country", "country"), ("country_code", "country_code"),
+        ("vehicle_number", "vehicle_number"), ("owner_name", "owner_name"),
+        ("chassis", "chassis_number"), ("engine", "engine_number"),
+        ("fuel", "fuel_type"), ("vehicle_class", "vehicle_class"),
+        ("maker", "maker"), ("model", "model"), ("reg_date", "registration_date"),
+        ("insurance", "insurance"), ("fitness", "fitness_upto"),
+        ("puc", "puc_upto"), ("rto", "rto"), ("financer", "financer"),
     ]
     for key, json_key in mapping:
         v = _clean_val(_get_field(rec, key))
@@ -1394,20 +1358,14 @@ def record_to_json_dict(rec):
     return out
 
 def build_json_text(records, query_info=None):
-    if not records:
-        return None
+    if not records: return None
     results = []
     for rec in records:
         jd = record_to_json_dict(rec)
-        if jd:
-            results.append(jd)
-    if not results:
-        return None
-    payload = {
-        "summary": f"{len(results)} record(s) found",
-    }
-    if query_info:
-        payload["query"] = query_info
+        if jd: results.append(jd)
+    if not results: return None
+    payload = {"summary": f"{len(results)} record(s) found"}
+    if query_info: payload["query"] = query_info
     payload["results"] = results
     return json.dumps(payload, indent=2, ensure_ascii=False)
 
@@ -1428,7 +1386,7 @@ def main_kb(uid):
     return kb
 
 # =================================================================
-#  ADMIN KEYBOARDS (Super Panel)
+#  ADMIN KEYBOARDS
 # =================================================================
 def admin_kb():
     kb = ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
@@ -1548,9 +1506,13 @@ def force_kb():
 def groups_kb():
     enabled = "🟢 ON" if group_enabled() else "🔴 OFF"
     auto_del = "🟢 ON" if group_auto_delete() else "🔴 OFF"
+    secs = group_auto_delete_seconds()
+    mins = secs // 60
+    time_str = f"{mins}m" if mins < 60 else f"{mins//60}h"
     kb = InlineKeyboardMarkup(row_width=1)
     kb.row(InlineKeyboardButton(f"🔀 Group Mode: {enabled}", callback_data="adm_grp_toggle"))
-    kb.row(InlineKeyboardButton(f"🗑 Auto Delete: {auto_del}", callback_data="adm_grp_tog_autodel"))
+    kb.row(InlineKeyboardButton(f"🗑 Auto Delete ({time_str}): {auto_del}", callback_data="adm_grp_tog_autodel"))
+    kb.row(InlineKeyboardButton("⏱ Set Delete Time", callback_data="adm_grp_set_deltime"))
     kb.row(InlineKeyboardButton("📋 List Groups", callback_data="adm_grp_list"))
     kb.row(InlineKeyboardButton("📢 Broadcast to Groups", callback_data="adm_grp_bc"))
     kb.row(InlineKeyboardButton("📝 Group Welcome Msg", callback_data="adm_grp_welcome"))
@@ -1764,16 +1726,30 @@ class FJManager:
         self.global_enabled = str(get_setting("force_enabled", "1")) == "1"
     def reload(self): self._load()
     def is_on(self): return self.global_enabled and bool(self.channels)
+
     def check(self, uid):
+        """
+        ⭐ v25 FINAL: Private channels (invite links) DON'T block.
+        User sends join request → bot lets them through immediately.
+        Admin approves manually from Telegram whenever they want.
+        Only public channels (@username) are enforced.
+        """
         if not self.is_on(): return None
         missing = []
         for cid, link in self.channels:
+            link_s = str(link or "")
+            # ⭐ Skip private channels (invite links with + or joinchat)
+            if '+' in link_s or 'joinchat' in link_s:
+                continue
+            # Enforce only public channels
             try:
                 m = self.bot.get_chat_member(cid, uid)
                 if m.status not in ('member', 'administrator', 'creator'):
                     missing.append((cid, link))
-            except: missing.append((cid, link))
+            except:
+                missing.append((cid, link))
         return missing if missing else None
+
     def ensure(self, uid, cid, pending=None):
         try:
             chat = self.bot.get_chat(cid)
@@ -1802,6 +1778,7 @@ class FJManager:
             self.msg[uid] = s.message_id
         except: pass
         return False
+
     def verify_cb(self, call):
         uid = call.from_user.id; cid = call.message.chat.id
         if self.check(uid) is None:
@@ -1825,6 +1802,7 @@ class FJManager:
             try: self.bot.answer_callback_query(call.id, "❌ Not joined!", show_alert=True)
             except: pass
             self.ensure(uid, cid)
+
     def _exec(self, uid, cid, p, call):
         t, d = p.get('type'), p.get('data')
         if t == 'number_search': process_number(uid, cid, d)
@@ -1837,10 +1815,12 @@ class FJManager:
             uname = call.from_user.username or "user"
             self.bot.send_message(cid, welcome_txt(uid, uname),
                 parse_mode='HTML', reply_markup=main_kb(uid))
+
     def toggle(self):
         cur = str(get_setting("force_enabled", "1")) == "1"
         set_setting("force_enabled", "0" if cur else "1")
         self.reload(); return not cur
+
     def add(self, cid, link=None):
         if not link:
             return False, "Invite link required"
@@ -1854,6 +1834,7 @@ class FJManager:
         except Exception as e: return False, str(e)
         if not add_channel_db(cid, link): return False, "Already exists"
         self.reload(); return True, "Added"
+
     def rm(self, cid):
         if remove_channel_db(cid): self.reload(); return True, "Removed"
         return False, "Not found"
@@ -1862,7 +1843,7 @@ manager = None
 states = {}
 
 # =================================================================
-#  SEND RESULT
+#  SEND RESULT — Group me + 1hr auto-delete
 # =================================================================
 def _send_plain_fallback(cid, text, reply_to=None, reply_markup=None):
     try:
@@ -1892,8 +1873,13 @@ def _split_safe(text, limit=MSG_SAFE_LIMIT):
     return parts
 
 def send_result(uid, cid, txt, reply_to=None, reply_markup=None, is_group_msg=False):
+    """
+    v25: Private → DM directly.
+         Group → Send in group + auto-delete after N seconds (default 1hr).
+    """
     is_private = (cid == uid or cid > 0)
 
+    # ═══ PRIVATE ═══
     if is_private:
         parts = _split_safe(txt, MSG_SAFE_LIMIT)
         sent_any = False
@@ -1917,31 +1903,43 @@ def send_result(uid, cid, txt, reply_to=None, reply_markup=None, is_group_msg=Fa
                 except Exception as e2:
                     logger.error(f"❌ Fallback failed: {e2}")
         if sent_any:
-            logger.info(f"✅ Result sent to {uid}")
+            logger.info(f"✅ Result sent to {uid} (private)")
         return
 
-    try:
-        bot.send_message(uid, txt, parse_mode='HTML',
-            reply_markup=reply_markup, disable_web_page_preview=True)
-        notice = f"✅ {fancy('result sent to your dm')}"
-        sent = bot.send_message(cid, notice, reply_to_message_id=reply_to)
-        if group_auto_delete():
-            def _del():
-                time.sleep(15)
-                try: bot.delete_message(cid, sent.message_id)
-                except: pass
-                if reply_to:
-                    try: bot.delete_message(cid, reply_to)
-                    except: pass
-            threading.Thread(target=_del, daemon=True).start()
-    except Exception as e:
-        logger.warning(f"DM failed for {uid}: {e}")
+    # ═══ GROUP ═══
+    logger.info(f"📢 Group result for U{uid} in group {cid}")
+    parts = _split_safe(txt, MSG_SAFE_LIMIT)
+    sent_msgs = []
+    for i, part in enumerate(parts):
+        kw = {'parse_mode': 'HTML', 'disable_web_page_preview': True}
+        if i == 0 and reply_to: kw['reply_to_message_id'] = reply_to
+        if i == len(parts) - 1 and reply_markup: kw['reply_markup'] = reply_markup
         try:
-            bot.send_message(cid,
-                f"⚠️ {fancy('please start the bot in dm first')}\n"
-                f"👉 @{BOT_USERNAME.replace('@','')}",
-                reply_to_message_id=reply_to)
-        except: pass
+            m = bot.send_message(cid, part, **kw)
+            sent_msgs.append(m.message_id)
+        except Exception as e:
+            logger.error(f"Group send failed: {e}")
+            try:
+                plain = re.sub(r'<[^>]+>', '', part)
+                plain = html_module.unescape(plain)
+                fb_kw = {}
+                if i == 0 and reply_to: fb_kw['reply_to_message_id'] = reply_to
+                m = bot.send_message(cid, plain[:4000], **fb_kw)
+                sent_msgs.append(m.message_id)
+            except Exception as e2:
+                logger.error(f"Group fallback failed: {e2}")
+
+    if sent_msgs and group_auto_delete():
+        delay = group_auto_delete_seconds()
+        delete_ids = list(sent_msgs)
+        if reply_to: delete_ids.append(reply_to)
+        def _del():
+            time.sleep(delay)
+            for mid in delete_ids:
+                try: bot.delete_message(cid, mid)
+                except: pass
+            logger.info(f"🗑 Auto-deleted {len(delete_ids)} msgs in group {cid} after {delay}s")
+        threading.Thread(target=_del, daemon=True).start()
 
 # =================================================================
 #  PROCESS: NUMBER
@@ -2013,7 +2011,7 @@ def process_number(uid, cid, phone, reply_to=None):
     send_result(uid, cid, txt, reply_to=reply_to)
 
 # =================================================================
-#  PROCESS: AADHAAR (FIXED)
+#  PROCESS: AADHAAR
 # =================================================================
 def process_aadhaar(uid, cid, aadhaar, reply_to=None):
     if is_maintenance() and not is_admin_user(uid):
@@ -2076,7 +2074,7 @@ def process_aadhaar(uid, cid, aadhaar, reply_to=None):
     send_result(uid, cid, txt, reply_to=reply_to)
 
 # =================================================================
-#  PROCESS: VEHICLE (NEW)
+#  PROCESS: VEHICLE
 # =================================================================
 def process_vehicle(uid, cid, vehicle, reply_to=None):
     if is_maintenance() and not is_admin_user(uid):
@@ -2253,7 +2251,7 @@ def process_menu(uid, cid, text, reply_to=None):
     if text == "👑 ADMIN PANEL":
         if not is_admin:
             bot.send_message(cid, "❌ Admin only", reply_to_message_id=reply_to); return
-        txt = (f"👑 <b>{fancy('admin panel v24')}</b>\n{div()}\n"
+        txt = (f"👑 <b>{fancy('admin panel v25')}</b>\n{div()}\n"
                f"ᴡᴇʟᴄᴏᴍᴇ ᴛᴏ ᴛʜᴇ ᴜʟᴛʀᴀ ᴄᴏɴᴛʀᴏʟ ᴄᴇɴᴛᴇʀ\n"
                f"ᴀʟʟ ꜰᴇᴀᴛᴜʀᴇꜱ ᴀᴠᴀɪʟᴀʙʟᴇ ʙᴇʟᴏᴡ.")
         bot.send_message(cid, txt, parse_mode='HTML',
@@ -2340,7 +2338,7 @@ def process_menu(uid, cid, text, reply_to=None):
                    f"⏱ ᴜᴘᴛɪᴍᴇ: <b>{hh}h {mm}m</b>\n"
                    f"🛰️ ᴘʏʀᴏɢʀᴀᴍ: <b>{'✅ READY' if _pyro_ready else '🔴 DISABLED'}</b>\n"
                    f"💾 ᴍᴏɴɢᴏ: <b>✅ CONNECTED</b>\n"
-                   f"🐍 ᴠᴇʀꜱɪᴏɴ: <b>v24 SUPER</b>\n"
+                   f"🐍 ᴠᴇʀꜱɪᴏɴ: <b>v25 FINAL</b>\n"
                    f"👑 ᴀᴅᴍɪɴ: <b>{ADMIN_ID}</b>")
             bot.send_message(cid, txt, parse_mode='HTML',
                 reply_markup=botinfo_kb(), reply_to_message_id=reply_to); return
@@ -2433,7 +2431,7 @@ def process_menu(uid, cid, text, reply_to=None):
         bot.send_message(cid, f"📞 ᴄᴏɴᴛᴀᴄᴛ: {ADMIN_USERNAME}\n\n"
             f"ᴜꜱᴇ /start ꜰᴏʀ ᴍᴇɴᴜ", reply_to_message_id=reply_to)
     elif text == "ℹ️ About":
-        about = get_setting("about_text", "") or f"ℹ️ ᴏꜱɪɴᴛ ʙᴏᴛ ᴠ24\n{BOT_USERNAME}"
+        about = get_setting("about_text", "") or f"ℹ️ ᴏꜱɪɴᴛ ʙᴏᴛ ᴠ25\n{BOT_USERNAME}"
         bot.send_message(cid, about, reply_to_message_id=reply_to)
 
 def process_promo(uid, cid, code, reply_to=None):
@@ -2724,6 +2722,38 @@ def cmd_stats(m):
     bot.reply_to(m, txt, parse_mode='HTML')
 
 # =================================================================
+#  ⭐ CHAT JOIN REQUEST — NO AUTO APPROVE
+# =================================================================
+@bot.message_handler(content_types=['chat_join_request'])
+def on_join_request(m):
+    """
+    ⭐ v25 FINAL: NO auto-approve.
+    User sends request → bot logs it + notifies admin.
+    User can use bot immediately (private channels skipped in check).
+    Admin approves manually from Telegram whenever they want.
+    """
+    try:
+        cid = m.chat.id
+        uid = m.from_user.id
+        uname = m.from_user.username or "user"
+        fname = m.from_user.first_name or ""
+        logger.info(f"📥 Join request: {uid} (@{uname}) → {cid}")
+
+        # Notify admin (info only — no auto-approve)
+        try:
+            bot.send_message(ADMIN_ID,
+                f"📥 <b>New Channel Join Request</b>\n\n"
+                f"👤 <b>{fname}</b> (@{uname})\n"
+                f"🆔 <code>{uid}</code>\n"
+                f"📢 Channel: <code>{cid}</code>\n\n"
+                f"<i>Open channel → Join Requests → Approve/Reject manually.</i>",
+                parse_mode='HTML')
+        except: pass
+
+    except Exception as e:
+        logger.error(f"join_request handler error: {e}")
+
+# =================================================================
 #  MENU BUTTONS HANDLER
 # =================================================================
 ALL_MENU_BUTTONS = [
@@ -2770,7 +2800,7 @@ def text_handler(m):
     if not is_admin and is_maintenance() and not bypass:
         bot.send_message(cid, f"🔧 {fancy('maintenance')}", reply_to_message_id=mid); return
 
-    # FJ with content-aware pending
+    # FJ content-aware pending (only in private, only Number/Aadhaar/Vehicle)
     if not bypass and m.chat.type == 'private':
         _k, _v = classify_input(text)
         if _k == "number":
@@ -2779,8 +2809,6 @@ def text_handler(m):
             _pending = {"type": "aadhaar_search", "data": _v}
         elif _k == "vehicle":
             _pending = {"type": "vehicle_search", "data": _v}
-        elif _k in ("tgid", "username"):
-            _pending = {"type": "tg2num_search", "data": _v}
         elif not text.startswith('/') and len(text) == 12 and text.isalnum() and text.isupper():
             _pending = {"type": "promo_redeem", "data": text}
         else:
@@ -2829,7 +2857,7 @@ def text_handler(m):
             try:
                 int_fields = ('welcome_bonus','referral_bonus','search_cost','aadhaar_cost',
                               'tg2num_cost','vehicle_cost','credits_per_rupee','daily_tries',
-                              'min_payment','max_payment')
+                              'min_payment','max_payment','group_auto_delete_seconds')
                 if field in int_fields:
                     val = int(text); set_setting(field, val)
                     bot.reply_to(m, f"✅ <b>{field}</b> = {val}", parse_mode='HTML')
@@ -2850,6 +2878,7 @@ def text_handler(m):
             elif panel == 'pay': bot.send_message(cid, "⚙️ Payment:", reply_markup=admin_pay_kb())
             elif panel == 'custom': bot.send_message(cid, "🎨 Custom:", reply_markup=admin_custom_kb())
             elif panel == 'endpoints': bot.send_message(cid, "🔗 Endpoints:", reply_markup=services_endpoints_kb())
+            elif panel == 'groups': bot.send_message(cid, "👥 Groups:", reply_markup=groups_kb())
             else: bot.send_message(cid, "⚙️ Settings:", reply_markup=settings_main_kb())
             return
 
@@ -3057,6 +3086,7 @@ def text_handler(m):
         except: bot.reply_to(m, "❌ Valid amount"); return
         states[uid] = {}; show_amount(uid, cid, a, mid); return
 
+    # Auto-detect ONLY for Number, Aadhaar, Vehicle
     kind, value = classify_input(text)
     if kind == "number":
         if m.chat.type == 'private' and not manager.ensure(uid, cid, {"type":"number_search","data":value}): return
@@ -3067,9 +3097,6 @@ def text_handler(m):
     elif kind == "vehicle":
         if m.chat.type == 'private' and not manager.ensure(uid, cid, {"type":"vehicle_search","data":value}): return
         process_vehicle(uid, cid, value, mid); return
-    elif kind in ("tgid","username"):
-        if m.chat.type == 'private' and not manager.ensure(uid, cid, {"type":"tg2num_search","data":value}): return
-        process_tg2num(uid, cid, value, mid); return
 
 # =================================================================
 #  GROUP HANDLERS
@@ -3198,14 +3225,12 @@ def cb(call):
     cache_tg_user(call.from_user)
     is_admin = is_admin_user(uid)
 
-    # ---- Admin Back ----
     if d == "adm_back":
         if not is_admin: return
         try: bot.delete_message(cid, call.message.message_id)
         except: pass
         bot.send_message(cid, "👑 Admin Panel", reply_markup=admin_kb()); return
 
-    # ---- Dashboard ----
     if d == "adm_dash_refresh":
         if not is_admin: return
         p, a, r, rev = pay_stats()
@@ -3256,7 +3281,6 @@ def cb(call):
         bot.send_message(cid, txt, parse_mode='HTML')
         safe_ans(call); return
 
-    # ---- Users ----
     if d == "adm_user_search":
         if not is_admin: return
         states[uid] = {'state': 'user_search'}
@@ -3342,7 +3366,6 @@ def cb(call):
             except: pass
         safe_ans(call); return
 
-    # ---- Payments ----
     if d == "adm_pay_pending":
         if not is_admin: return
         ps = get_pending()
@@ -3396,7 +3419,6 @@ def cb(call):
         bot.send_message(cid, "💳 Payment", reply_markup=payments_kb())
         safe_ans(call); return
 
-    # ---- Services ----
     if d == "adm_svc_back":
         if not is_admin: return
         try: bot.edit_message_text("🔧 Services", cid, call.message.message_id, reply_markup=services_kb())
@@ -3435,7 +3457,6 @@ def cb(call):
         bot.send_message(cid, "🧪 <b>API Health</b>\n\n" + "\n".join(results), parse_mode='HTML')
         safe_ans(call); return
 
-    # Endpoints map
     ep_map = {
         'adm_ep_numurl':     ('api_url_env',      'Number API URL', False),
         'adm_ep_numkey':     ('api_key_env',      'Number API Key', True),
@@ -3479,7 +3500,6 @@ def cb(call):
         bot.send_message(cid, "🔗 <b>All Endpoints</b>\n\n" + "\n\n".join(vals), parse_mode='HTML')
         safe_ans(call); return
 
-    # ---- Promos ----
     if d == "adm_promo_gen":
         if not is_admin: return
         states[uid] = {'state': 'promo1'}
@@ -3501,7 +3521,6 @@ def cb(call):
         bot.send_message(cid, f"🎟 Promos: {total}\nTotal Redeems: {used}")
         safe_ans(call); return
 
-    # ---- Broadcast ----
     if d == "adm_bc_text":
         if not is_admin: return
         states[uid] = {'state': 'broadcast'}
@@ -3548,7 +3567,6 @@ def cb(call):
         except: pass
         safe_ans(call); return
 
-    # ---- Groups ----
     if d == "adm_grp_toggle":
         if not is_admin: return
         cur = int(get_setting("group_enabled", 1))
@@ -3562,6 +3580,16 @@ def cb(call):
         set_setting("group_auto_delete", 0 if cur else 1)
         try: bot.edit_message_reply_markup(cid, call.message.message_id, reply_markup=groups_kb())
         except: pass
+        safe_ans(call); return
+    if d == "adm_grp_set_deltime":
+        if not is_admin: return
+        states[uid] = {'state': 'ads_input', 'field': 'group_auto_delete_seconds', 'panel': 'groups'}
+        cur = group_auto_delete_seconds()
+        bot.send_message(cid,
+            f"⏱ <b>Set Auto-Delete Time</b>\n\n"
+            f"ᴄᴜʀʀᴇɴᴛ: <b>{cur}s</b> ({cur//60} min)\n\n"
+            f"ꜱᴇɴᴅ ꜱᴇᴄᴏɴᴅꜱ (ᴇx: 3600 = 1 ʜᴏᴜʀ, 1800 = 30 ᴍɪɴ):",
+            parse_mode='HTML')
         safe_ans(call); return
     if d == "adm_grp_list":
         if not is_admin: return
@@ -3600,7 +3628,6 @@ def cb(call):
         bot.send_message(cid, f"✅ Left {count} groups")
         safe_ans(call); return
 
-    # ---- Security ----
     if d == "adm_sec_banned":
         if not is_admin: return
         banned = users_col.count_documents({"banned": 1})
@@ -3644,7 +3671,6 @@ def cb(call):
         bot.send_message(cid, r, parse_mode='HTML')
         safe_ans(call); return
 
-    # ---- Analytics ----
     if d == "adm_an_growth":
         if not is_admin: return
         days = []
@@ -3681,7 +3707,6 @@ def cb(call):
         bot.send_message(cid, f"🆔 Aadhaar searches counted in total: {total_searches()}")
         safe_ans(call); return
 
-    # ---- Backup ----
     if d == "adm_bk_users":
         if not is_admin: return
         csv_d = export_csv()
@@ -3737,7 +3762,6 @@ def cb(call):
         except: pass
         safe_ans(call); return
 
-    # ---- Feedback ----
     if d == "adm_fb_view":
         if not is_admin: return
         fbs = list(feedback_col.find().sort("at", -1).limit(10))
@@ -3756,7 +3780,6 @@ def cb(call):
         bot.send_message(cid, f"✅ Cleared {cnt} feedback")
         safe_ans(call); return
 
-    # ---- Force Join ----
     if d == "force_verify": manager.verify_cb(call); return
     if d.startswith('fj_'):
         if not is_admin: return
@@ -3793,7 +3816,6 @@ def cb(call):
             manager.rm(int(d.split('_')[2]))
             safe_ans(call, "Removed"); return
 
-    # ---- Settings ----
     if d.startswith('ads_'):
         if not is_admin: return
         if d == 'ads_back':
@@ -3916,7 +3938,6 @@ def cb(call):
             safe_ans(call); return
         return
 
-    # ---- Payment user flow ----
     if d == "ps_noop": return
     if d == "auto_na":
         safe_ans(call, "Auto UPI unavailable", True); return
@@ -4043,7 +4064,7 @@ def cb(call):
 if __name__ == "__main__":
     init_db()
     manager = FJManager(bot)
-    logger.info("🚀 Bot v24 SUPER starting...")
+    logger.info("🚀 Bot v25 FINAL starting...")
     init_pyrogram()
     logger.info(f"👑 Admin: {ADMIN_ID}")
     logger.info(f"🛰️ Pyrogram: {'READY' if _pyro_ready else 'DISABLED'}")
@@ -4051,9 +4072,9 @@ if __name__ == "__main__":
     logger.info(f"🆔 Aadhaar API: {AADHAAR_URL}")
     logger.info(f"🚗 Vehicle API: {VEHICLE_URL}")
     logger.info(f"🎁 Welcome Bonus: {WELCOME_BONUS} CREDITS")
+    logger.info(f"⏱ Group Auto-Delete: {GROUP_AUTO_DELETE_SECONDS}s")
     resume_pending_orders()
 
-    # Set commands
     try:
         bot.set_my_commands([
             BotCommand("start", "🏠 Main Menu"),
