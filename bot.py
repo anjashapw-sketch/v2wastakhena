@@ -1,13 +1,12 @@
 """
 ================================================================
-  Num Info Bot — v30 FORCE-JOIN FULLY FIXED
-  ✅ FJ: fj_verified flag trusted (24h grace) — no repeated prompts
-  ✅ FJ: private channels only need join-request (no admin wait)
-  ✅ FJ: transient API errors never block user
-  ✅ FJ: verify_cb uses force-check + clears flag on fail
-  ✅ FJ: prompt shows only MISSING channels
-  ✅ FJ: ensure() calls check() once (was 2x)
-  ✅ All previous v29 fixes retained
+  Num Info Bot — v31 FJ REAL-TIME CHECK
+  ✅ FJ: only missing channels shown in prompt
+  ✅ FJ: public → real get_chat_member check (left = block)
+  ✅ FJ: private → join-request sent = pass
+  ✅ FJ: transient errors skip (never wrong-block)
+  ✅ FJ: no grace period (real-time every message)
+  ✅ All v29 payment/atomic/group fixes retained
 ================================================================
 """
 
@@ -123,8 +122,6 @@ ORDER_LIFETIME = 300
 CACHE_MAX_AGE_DAYS = 30
 MSG_SAFE_LIMIT = 3800
 GROUP_AUTO_DELETE_SECONDS = 3600
-# ✅ FIX: FJ verification grace period (hours)
-FJ_VERIFY_GRACE_HOURS = int(env("FJ_VERIFY_GRACE_HOURS", "24"))
 
 if not BOT_TOKEN: logger.critical("❌ BOT_TOKEN missing"); sys.exit(1)
 if not MONGO_URI: logger.critical("❌ MONGO_URI missing"); sys.exit(1)
@@ -271,7 +268,7 @@ def get_or_create_user(uid):
             "banned": 0, "searches": 0,
             "tries_used": 0, "tries_date": today_str(),
             "fj_verified": False,
-            "fj_verified_at": None,       # ✅ NEW
+            "fj_verified_at": None,
             "fj_requested_channels": [],
             "pending_referrer": None,
             "joined_at": now(), "last_seen": now()
@@ -358,7 +355,6 @@ def is_banned(uid):
         return u and u.get("banned", 0) == 1
     except: return False
 
-# -------- FJ persistence (UPDATED) --------
 def is_fj_verified(uid):
     try:
         u = users_col.find_one({"user_id": uid}, {"fj_verified": 1})
@@ -366,7 +362,7 @@ def is_fj_verified(uid):
     except: return False
 
 def mark_fj_verified(uid):
-    """✅ FIX: stores timestamp for grace-period trust"""
+    """Sirf stats ke liye — gating real-time check se hoti hai"""
     try:
         users_col.update_one({"user_id": uid},
             {"$set": {"fj_verified": True, "fj_verified_at": now()}},
@@ -375,7 +371,6 @@ def mark_fj_verified(uid):
         logger.error(f"mark_fj_verified: {e}")
 
 def unmark_fj_verified(uid):
-    """✅ FIX: clears timestamp too"""
     try:
         users_col.update_one({"user_id": uid},
             {"$set": {"fj_verified": False, "fj_requested_channels": []},
@@ -1742,7 +1737,7 @@ def welcome_txt(uid, uname):
             f"🚗 ᴠᴇʜɪᴄʟᴇ — {get_setting('vehicle_cost',10)}ᴄʀ\n\n{e}")
 
 # =================================================================
-#  FORCE JOIN MANAGER — v30 FULLY FIXED
+#  FORCE JOIN MANAGER — v31 REAL-TIME
 # =================================================================
 class FJManager:
     def __init__(self, bot):
@@ -1803,59 +1798,67 @@ class FJManager:
     def _is_active(self, cid):
         return any(c[0] == cid for c in self.active)
 
-    # ✅ FIX: Trust fj_verified flag + don't block on transient errors
     def check(self, uid, force=False):
         """
-        Returns:
-          - None  → user is verified / all good
-          - list  → missing channels [(cid, link), ...]
+        ✅ v31 REAL-TIME:
+        - Public channel: get_chat_member call. Not member → missing.
+        - Private channel: fj_requested_channels me hai → pass, warna missing.
+        - Transient errors (FloodWait/timeout/bot-perm) → SKIP (block nahi).
+        - Koi grace period nahi. Har baar real check.
         """
         if not self.is_on(): return None
         if is_admin_user(uid): return None
 
-        u = users_col.find_one({"user_id": uid},
-            {"fj_verified": 1, "fj_verified_at": 1, "fj_requested_channels": 1})
-
-        # ✅ FIX #1: Trust fj_verified flag within grace period
-        if not force and u and u.get("fj_verified"):
-            va = u.get("fj_verified_at")
-            if not va or (now() - va) < timedelta(hours=FJ_VERIFY_GRACE_HOURS):
-                return None
-
+        u = users_col.find_one({"user_id": uid}, {"fj_requested_channels": 1})
         requested = set(u.get("fj_requested_channels", [])) if u else set()
+
         missing = []
-
         for cid, link in self.channels:
-            is_priv = self._is_private(link)
-
-            # ✅ FIX #2: skip channels where bot isn't admin (can't verify anyway)
+            # Bot jis channel me admin nahi hai, usko skip karo
             if not self._is_active(cid):
                 continue
 
+            is_priv = self._is_private(link)
+
+            # ---- PRIVATE CHANNEL: sirf join-request check ----
             if is_priv:
-                # ✅ FIX #3: private channel → only require join-request sent
-                # (admin will approve; we don't wait for it)
                 if cid not in requested:
                     missing.append((cid, link))
+                    logger.info(f"FJ: U{uid} no request for private C{cid}")
                 continue
 
-            # Public channel: check membership directly
+            # ---- PUBLIC CHANNEL: real membership check ----
             try:
                 m = self.bot.get_chat_member(cid, uid)
                 status = m.status
                 is_member = status in ('member', 'administrator', 'creator')
                 if status == 'restricted' and getattr(m, 'is_member', False):
                     is_member = True
+
                 if not is_member:
                     missing.append((cid, link))
+                    logger.info(f"FJ: U{uid} NOT in public C{cid} (status={status})")
             except Exception as e:
-                # ✅ FIX #4: NEVER block on our own API/bot errors
-                logger.warning(f"FJ check skip U{uid} C{cid}: {e}")
-                continue
+                err = str(e).lower()
+                # ✅ Sirf DEFINITIVE "not member" errors pe block karo
+                definitive = (
+                    'user not found' in err or
+                    'user_not_participant' in err or
+                    'participant not found' in err or
+                    'participant_id_invalid' in err or
+                    'user is not a member' in err or
+                    'user was kicked' in err or
+                    'chat member not found' in err
+                )
+                if definitive:
+                    missing.append((cid, link))
+                    logger.info(f"FJ: U{uid} definitively not in C{cid}: {e}")
+                else:
+                    # ⚠️ Bot-perm / FloodWait / network → skip (block nahi)
+                    logger.warning(f"FJ skip U{uid} C{cid} (transient): {e}")
 
         return missing if missing else None
 
-    # ✅ FIX: single check() call, only missing channels shown
     def ensure(self, uid, cid, pending=None):
         try:
             chat = self.bot.get_chat(cid)
@@ -1864,22 +1867,21 @@ class FJManager:
 
         if is_admin_user(uid): return True
 
-        missing = self.check(uid)              # ✅ single call
+        missing = self.check(uid)
         if not missing:
             if pending is None: self.pending.pop(uid, None)
             return True
 
-        # Always overwrite pending with latest action
         if pending is not None:
             self.pending[uid] = pending
 
-        # Delete previous FJ prompt
+        # Purana FJ prompt delete
         old = self.msg.pop(uid, None)
         if old:
             try: self.bot.delete_message(cid, old)
             except: pass
 
-        # ✅ FIX: show ONLY missing channels
+        # ✅ SIRF missing channels ke buttons
         kb = InlineKeyboardMarkup(row_width=1)
         seen = set()
         idx = 0
@@ -1910,16 +1912,14 @@ class FJManager:
             logger.error(f"FJ prompt send failed: {e}")
         return False
 
-    # ✅ FIX: force-check + clear flag on fail
     def verify_cb(self, call):
         uid = call.from_user.id
         cid = call.message.chat.id
 
         logger.info(f"FJ verify clicked by {uid}")
-        missing = self.check(uid, force=True)     # ✅ force re-check
+        missing = self.check(uid)
 
         if missing is None:
-            # All good → mark verified
             mark_fj_verified(uid)
             _process_pending_referral(uid)
 
@@ -1947,11 +1947,6 @@ class FJManager:
             except: pass
             safe_ans(call, "✅ Verified!")
         else:
-            # ✅ FIX: clear fj_verified flag so next ensure() re-prompts correctly
-            try:
-                users_col.update_one({"user_id": uid},
-                    {"$set": {"fj_verified": False}})
-            except: pass
             old_mid = self.msg.pop(uid, None)
             if old_mid:
                 try: self.bot.delete_message(cid, old_mid)
@@ -2416,7 +2411,7 @@ def process_menu(uid, cid, text, reply_to=None):
     if text == "👑 ADMIN PANEL":
         if not is_admin:
             bot.send_message(cid, "❌ Admin only", reply_to_message_id=reply_to); return
-        txt = (f"👑 <b>{fancy('admin panel v30')}</b>\n{div()}\n"
+        txt = (f"👑 <b>{fancy('admin panel v31')}</b>\n{div()}\n"
                f"ᴡᴇʟᴄᴏᴍᴇ ᴛᴏ ᴛʜᴇ ᴜʟᴛʀᴀ ᴄᴏɴᴛʀᴏʟ ᴄᴇɴᴛᴇʀ")
         bot.send_message(cid, txt, parse_mode='HTML',
             reply_markup=admin_kb(), reply_to_message_id=reply_to); return
@@ -2491,7 +2486,7 @@ def process_menu(uid, cid, text, reply_to=None):
                    f"⏱ ᴜᴘᴛɪᴍᴇ: <b>{hh}h {mm}m</b>\n"
                    f"🛰️ ᴘʏʀᴏɢʀᴀᴍ: <b>{'✅ READY' if _pyro_ready else '🔴 DISABLED'}</b>\n"
                    f"💾 ᴍᴏɴɢᴏ: <b>✅ CONNECTED</b>\n"
-                   f"🐍 ᴠᴇʀꜱɪᴏɴ: <b>v30 FJ FIXED</b>\n"
+                   f"🐍 ᴠᴇʀꜱɪᴏɴ: <b>v31 FJ REAL-TIME</b>\n"
                    f"👑 ᴀᴅᴍɪɴ: <b>{ADMIN_ID}</b>")
             bot.send_message(cid, txt, parse_mode='HTML',
                 reply_markup=botinfo_kb(), reply_to_message_id=reply_to); return
@@ -2577,7 +2572,7 @@ def process_menu(uid, cid, text, reply_to=None):
         bot.send_message(cid, f"📞 ᴄᴏɴᴛᴀᴄᴛ: {ADMIN_USERNAME}\n\nᴜꜱᴇ /start ꜰᴏʀ ᴍᴇɴᴜ",
             reply_to_message_id=reply_to)
     elif text == "ℹ️ About":
-        about = get_setting("about_text", "") or f"ℹ️ ᴏꜱɪɴᴛ ʙᴏᴛ ᴠ30\n{BOT_USERNAME}"
+        about = get_setting("about_text", "") or f"ℹ️ ᴏꜱɪɴᴛ ʙᴏᴛ ᴠ31\n{BOT_USERNAME}"
         bot.send_message(cid, about, reply_to_message_id=reply_to)
 
 def process_promo(uid, cid, code, reply_to=None):
@@ -4080,7 +4075,7 @@ def cb(call):
 if __name__ == "__main__":
     init_db()
     manager = FJManager(bot)
-    logger.info("🚀 Bot v30 FJ-FIXED starting...")
+    logger.info("🚀 Bot v31 FJ REAL-TIME starting...")
     init_pyrogram()
     logger.info(f"👑 Admin: {ADMIN_ID}")
     logger.info(f"🛰️ Pyrogram: {'READY' if _pyro_ready else 'DISABLED'}")
@@ -4090,7 +4085,6 @@ if __name__ == "__main__":
     logger.info(f"🎁 Welcome Bonus: {WELCOME_BONUS} CREDITS")
     logger.info(f"⏱ Group Auto-Delete: {GROUP_AUTO_DELETE_SECONDS}s")
     logger.info(f"📢 Force Join: {len(manager.active)} active, {len(manager.inactive)} inactive")
-    logger.info(f"🔓 FJ Grace Period: {FJ_VERIFY_GRACE_HOURS}h")
     resume_pending_orders()
 
     try:
