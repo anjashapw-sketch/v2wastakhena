@@ -1,16 +1,13 @@
 """
 ================================================================
-  Num Info Bot — v29 FULLY FIXED
-  ✅ Payment atomic + credited flag (race-safe)
-  ✅ Referral bonus AFTER FJ verify (no abuse)
-  ✅ Group /start + admin panel blocked
-  ✅ Group auto-delete doesn't kill user msg
-  ✅ Pre-tag-aware message splitter
-  ✅ FJ pending action always overwritten
-  ✅ classify_input ambiguity fixed
-  ✅ name/owner_name duplicate fixed
-  ✅ safe_ans everywhere (no stuck spinner)
-  ✅ Payment screenshots bypass FJ
+  Num Info Bot — v30 FORCE-JOIN FULLY FIXED
+  ✅ FJ: fj_verified flag trusted (24h grace) — no repeated prompts
+  ✅ FJ: private channels only need join-request (no admin wait)
+  ✅ FJ: transient API errors never block user
+  ✅ FJ: verify_cb uses force-check + clears flag on fail
+  ✅ FJ: prompt shows only MISSING channels
+  ✅ FJ: ensure() calls check() once (was 2x)
+  ✅ All previous v29 fixes retained
 ================================================================
 """
 
@@ -126,6 +123,8 @@ ORDER_LIFETIME = 300
 CACHE_MAX_AGE_DAYS = 30
 MSG_SAFE_LIMIT = 3800
 GROUP_AUTO_DELETE_SECONDS = 3600
+# ✅ FIX: FJ verification grace period (hours)
+FJ_VERIFY_GRACE_HOURS = int(env("FJ_VERIFY_GRACE_HOURS", "24"))
 
 if not BOT_TOKEN: logger.critical("❌ BOT_TOKEN missing"); sys.exit(1)
 if not MONGO_URI: logger.critical("❌ MONGO_URI missing"); sys.exit(1)
@@ -213,7 +212,6 @@ def init_db():
         "fj_custom_msg": "",
         "aadhaar_live_url": "https://apihitech.vercel.app/search?q=",
     }
-    # ✅ FIX: bulk insert for defaults
     try:
         existing_keys = set(d["key"] for d in settings_col.find({}, {"key": 1}))
         bulk_ops = []
@@ -273,8 +271,9 @@ def get_or_create_user(uid):
             "banned": 0, "searches": 0,
             "tries_used": 0, "tries_date": today_str(),
             "fj_verified": False,
+            "fj_verified_at": None,       # ✅ NEW
             "fj_requested_channels": [],
-            "pending_referrer": None,  # ✅ FIX: track pending referrer for post-FJ bonus
+            "pending_referrer": None,
             "joined_at": now(), "last_seen": now()
         }
         users_col.update_one({"user_id": uid}, {"$setOnInsert": doc}, upsert=True)
@@ -345,7 +344,6 @@ def tries_display(uid):
     return str(r)
 
 def add_referral_bonus(rid):
-    """✅ FIX: idempotent referral bonus"""
     try:
         if is_banned(rid): return False
         b = int(get_setting("referral_bonus", REFERRAL_BONUS))
@@ -360,7 +358,7 @@ def is_banned(uid):
         return u and u.get("banned", 0) == 1
     except: return False
 
-# FJ persistence
+# -------- FJ persistence (UPDATED) --------
 def is_fj_verified(uid):
     try:
         u = users_col.find_one({"user_id": uid}, {"fj_verified": 1})
@@ -368,14 +366,20 @@ def is_fj_verified(uid):
     except: return False
 
 def mark_fj_verified(uid):
-    try: users_col.update_one({"user_id": uid},
-        {"$set": {"fj_verified": True}}, upsert=True)
-    except: pass
-
-def unmark_fj_verified(uid):
+    """✅ FIX: stores timestamp for grace-period trust"""
     try:
         users_col.update_one({"user_id": uid},
-            {"$set": {"fj_verified": False, "fj_requested_channels": []}})
+            {"$set": {"fj_verified": True, "fj_verified_at": now()}},
+            upsert=True)
+    except Exception as e:
+        logger.error(f"mark_fj_verified: {e}")
+
+def unmark_fj_verified(uid):
+    """✅ FIX: clears timestamp too"""
+    try:
+        users_col.update_one({"user_id": uid},
+            {"$set": {"fj_verified": False, "fj_requested_channels": []},
+             "$unset": {"fj_verified_at": ""}})
     except: pass
 
 def mark_join_request(uid, cid):
@@ -805,14 +809,8 @@ def get_pending():
     except: return []
 
 def _credit_payment_atomic(p):
-    """
-    ✅ FIX: Safely credit a user for a payment.
-    Uses 'credited' flag for idempotency to prevent double-credit or lost credits.
-    Returns True if credits were newly applied, False if already credited or failed.
-    """
     if not p: return False
     pid = p["_id"]
-    # Atomically claim the "credit" job
     claimed = payments_col.find_one_and_update(
         {"_id": pid, "credited": {"$ne": True}},
         {"$set": {"credited": True, "credited_at": now()}},
@@ -820,10 +818,8 @@ def _credit_payment_atomic(p):
     if not claimed:
         logger.info(f"Payment {pid} already credited — skipping")
         return False
-    # Now add credits
     ok = add_credits(claimed["user_id"], claimed["credits"])
     if not ok:
-        # Rollback credited flag so a retry can happen
         payments_col.update_one({"_id": pid},
             {"$set": {"credited": False, "credit_error": "add_credits failed"}})
         logger.error(f"❌ CRITICAL: credit failed for payment {pid}")
@@ -831,20 +827,14 @@ def _credit_payment_atomic(p):
     return True
 
 def approve_atomic(pid, aid):
-    """
-    ✅ FIX: Credits added BEFORE marking approved.
-    Prevents the classic 'paid but not credited' bug.
-    """
     try: oid = ObjectId(pid)
     except: return False, None
-    # 1. Atomically claim (pending → approved)
     r = payments_col.find_one_and_update(
         {"_id": oid, "status": "pending"},
         {"$set": {"status": "approved", "approved_at": now(), "approved_by": aid}},
         return_document=ReturnDocument.AFTER)
     if not r:
         return False, payments_col.find_one({"_id": oid})
-    # 2. Credit user (idempotent via 'credited' flag)
     _credit_payment_atomic(r)
     return True, r
 
@@ -1030,7 +1020,6 @@ except: pass
 
 _bot_me_cache = None
 def get_bot_me():
-    """✅ FIX: cache get_me() to avoid extra network calls"""
     global _bot_me_cache
     if _bot_me_cache is None:
         try: _bot_me_cache = bot.get_me()
@@ -1072,7 +1061,7 @@ class AnimMsg:
         self.mid = None; self._stop = threading.Event(); self._t = None
         self._start_time = time.time()
         self._dead = False
-        self._lock = threading.Lock()  # ✅ FIX: prevent concurrent edit race
+        self._lock = threading.Lock()
         self.frames = self._build(stages or [])
     def _build(self, stages):
         frames = []; total = len(stages) or 1; BAR = self.BAR_LEN
@@ -1222,7 +1211,7 @@ def low_credit_kb(uid):
     return kb
 
 # =================================================================
-#  INPUT HELPERS  (✅ FIXED: classification ambiguity)
+#  INPUT HELPERS
 # =================================================================
 def extract_phone_digits(text):
     if not text: return None
@@ -1241,11 +1230,6 @@ def is_vehicle_number(text):
     return bool(re.match(r'^[A-Z]{2}[0-9]{1,2}[A-Z]{1,3}[0-9]{4}$', v))
 
 def classify_input(text):
-    """
-    ✅ FIX: 12-digit numbers are ambiguous (Aadhaar vs TG ID).
-    We prefer Aadhaar because 12-digit Aadhaar is the more common 12-digit input.
-    Users who want TG ID should use the dedicated Username/ID menu.
-    """
     if not text: return None, None
     t = text.strip()
     if not t: return None, None
@@ -1263,12 +1247,9 @@ def classify_input(text):
             return "username", u
         return None, None
     if t.isdigit():
-        # Try phone first (10-digit)
         phone = extract_phone_digits(t)
         if phone: return "number", phone
-        # 12-digit → Aadhaar (more likely than TG ID for raw digit input)
         if len(t) == 12: return "aadhaar", t
-        # 5-15 digits → TG ID
         if 5 <= len(t) <= 15: return "tgid", t
         return None, None
     if t.startswith("+"):
@@ -1307,7 +1288,7 @@ def normalize_phone(num, cc=None):
     return n
 
 # =================================================================
-#  JSON OUTPUT  (✅ FIXED: name/owner_name duplicate)
+#  JSON OUTPUT
 # =================================================================
 _FIELD_ALIASES = {
     "name": ("name","full_name","fullname","customer_name","user_name"),
@@ -1328,7 +1309,6 @@ _FIELD_ALIASES = {
     "country": ("country","nation"),
     "country_code": ("country_code","cc","code"),
     "vehicle_number": ("vehicle_number","reg_no","registration_number","vehicle","v_number"),
-    # ✅ FIX: removed "name" from owner_name aliases (was colliding with "name")
     "owner_name": ("owner_name","owner","owner_full_name"),
     "chassis": ("chassis","chassis_no","chassis_number"),
     "engine": ("engine","engine_no","engine_number"),
@@ -1545,7 +1525,7 @@ def broadcast_settings_kb():
 def force_kb():
     en = manager.global_enabled if manager else False
     st = "✅ ON" if en else "❌ OFF"
-    active = len(manager.channels) if manager else 0
+    active = len(manager.active) if manager else 0
     inactive = len(manager.inactive) if manager else 0
     kb = InlineKeyboardMarkup(row_width=2)
     kb.row(InlineKeyboardButton(f"🔄 Toggle ({st})", callback_data="fj_toggle"))
@@ -1762,7 +1742,7 @@ def welcome_txt(uid, uname):
             f"🚗 ᴠᴇʜɪᴄʟᴇ — {get_setting('vehicle_cost',10)}ᴄʀ\n\n{e}")
 
 # =================================================================
-#  FORCE JOIN MANAGER — v29 FIXED
+#  FORCE JOIN MANAGER — v30 FULLY FIXED
 # =================================================================
 class FJManager:
     def __init__(self, bot):
@@ -1823,48 +1803,43 @@ class FJManager:
     def _is_active(self, cid):
         return any(c[0] == cid for c in self.active)
 
-    def check(self, uid):
+    # ✅ FIX: Trust fj_verified flag + don't block on transient errors
+    def check(self, uid, force=False):
         """
-        ✅ FIX: Distinguish transient errors (FloodWait, network) from real "not member".
+        Returns:
+          - None  → user is verified / all good
+          - list  → missing channels [(cid, link), ...]
         """
         if not self.is_on(): return None
         if is_admin_user(uid): return None
 
+        u = users_col.find_one({"user_id": uid},
+            {"fj_verified": 1, "fj_verified_at": 1, "fj_requested_channels": 1})
+
+        # ✅ FIX #1: Trust fj_verified flag within grace period
+        if not force and u and u.get("fj_verified"):
+            va = u.get("fj_verified_at")
+            if not va or (now() - va) < timedelta(hours=FJ_VERIFY_GRACE_HOURS):
+                return None
+
+        requested = set(u.get("fj_requested_channels", [])) if u else set()
         missing = []
-        u = users_col.find_one({"user_id": uid}, {"fj_requested_channels": 1})
-        requested_channels = set(u.get("fj_requested_channels", [])) if u else set()
 
         for cid, link in self.channels:
             is_priv = self._is_private(link)
-            is_active = self._is_active(cid)
 
-            if is_priv:
-                if not is_active:
-                    logger.warning(f"FJ skip private {cid}: bot not admin")
-                    continue
-                if cid not in requested_channels:
-                    missing.append((cid, link))
-                    continue
-                try:
-                    m = self.bot.get_chat_member(cid, uid)
-                    status = m.status
-                    is_member = status in ('member', 'administrator', 'creator')
-                    if status == 'restricted' and getattr(m, 'is_member', False):
-                        is_member = True
-                    if not is_member:
-                        missing.append((cid, link))
-                        logger.info(f"FJ: U{uid} left private channel {cid} (status={status})")
-                except Exception as e:
-                    err = str(e).lower()
-                    if 'user not found' in err or 'user_not_participant' in err or 'participant not found' in err:
-                        missing.append((cid, link))
-                        logger.info(f"FJ: U{uid} not participant in private {cid}")
-                    else:
-                        # Bot-side error — but user sent request, allow
-                        logger.warning(f"FJ verify private {cid}: {e} (allowing — request sent)")
+            # ✅ FIX #2: skip channels where bot isn't admin (can't verify anyway)
+            if not self._is_active(cid):
                 continue
 
-            # PUBLIC CHANNEL
+            if is_priv:
+                # ✅ FIX #3: private channel → only require join-request sent
+                # (admin will approve; we don't wait for it)
+                if cid not in requested:
+                    missing.append((cid, link))
+                continue
+
+            # Public channel: check membership directly
             try:
                 m = self.bot.get_chat_member(cid, uid)
                 status = m.status
@@ -1873,29 +1848,14 @@ class FJManager:
                     is_member = True
                 if not is_member:
                     missing.append((cid, link))
-                    logger.info(f"FJ: U{uid} not member of public {cid} (status={status})")
             except Exception as e:
-                err = str(e).lower()
-                # ✅ FIX: bot permission → skip; transient errors → also skip (retry later)
-                skip_errors = (
-                    'chat_admin_required' in err or
-                    'not enough rights' in err or
-                    'bot is not a member' in err or
-                    'bot was kicked' in err or
-                    'too many requests' in err or
-                    'flood_wait' in err or
-                    'timeout' in err or
-                    'connection' in err
-                )
-                if skip_errors:
-                    logger.warning(f"FJ skip public {cid}: transient/bot-perm — {e}")
-                    continue
-                # User-side error → not a member
-                missing.append((cid, link))
-                logger.info(f"FJ: U{uid} blocked from public {cid} (error: {str(e)[:80]})")
+                # ✅ FIX #4: NEVER block on our own API/bot errors
+                logger.warning(f"FJ check skip U{uid} C{cid}: {e}")
+                continue
 
         return missing if missing else None
 
+    # ✅ FIX: single check() call, only missing channels shown
     def ensure(self, uid, cid, pending=None):
         try:
             chat = self.bot.get_chat(cid)
@@ -1903,27 +1863,27 @@ class FJManager:
         except: return True
 
         if is_admin_user(uid): return True
-        if self.check(uid) is None:
-            # ✅ FIX: clear any stale pending
+
+        missing = self.check(uid)              # ✅ single call
+        if not missing:
             if pending is None: self.pending.pop(uid, None)
             return True
 
-        # ✅ FIX: ALWAYS overwrite pending with the latest action (was: only if empty/welcome)
+        # Always overwrite pending with latest action
         if pending is not None:
             self.pending[uid] = pending
 
+        # Delete previous FJ prompt
         old = self.msg.pop(uid, None)
         if old:
             try: self.bot.delete_message(cid, old)
             except: pass
 
-        missing = self.check(uid)
-        if not missing: return True
-
+        # ✅ FIX: show ONLY missing channels
         kb = InlineKeyboardMarkup(row_width=1)
         seen = set()
         idx = 0
-        for cid_, lk in self.channels:
+        for cid_, lk in missing:
             if cid_ in seen: continue
             seen.add(cid_)
             idx += 1
@@ -1945,20 +1905,21 @@ class FJManager:
                 settings_col.update_one({"key": "fj_stats_blocks"},
                     {"$inc": {"value": 1}}, upsert=True)
             except: pass
-            logger.info(f"FJ prompt sent to {uid}")
+            logger.info(f"FJ prompt sent to {uid} ({len(missing)} missing)")
         except Exception as e:
             logger.error(f"FJ prompt send failed: {e}")
         return False
 
+    # ✅ FIX: force-check + clear flag on fail
     def verify_cb(self, call):
         uid = call.from_user.id
         cid = call.message.chat.id
 
         logger.info(f"FJ verify clicked by {uid}")
-        missing = self.check(uid)
+        missing = self.check(uid, force=True)     # ✅ force re-check
 
         if missing is None:
-            # ✅ ALL GOOD → mark verified, credit any pending referral
+            # All good → mark verified
             mark_fj_verified(uid)
             _process_pending_referral(uid)
 
@@ -1986,11 +1947,16 @@ class FJManager:
             except: pass
             safe_ans(call, "✅ Verified!")
         else:
+            # ✅ FIX: clear fj_verified flag so next ensure() re-prompts correctly
+            try:
+                users_col.update_one({"user_id": uid},
+                    {"$set": {"fj_verified": False}})
+            except: pass
             old_mid = self.msg.pop(uid, None)
             if old_mid:
                 try: self.bot.delete_message(cid, old_mid)
                 except: pass
-            safe_ans(call, "❌ Not joined all channels!", True)
+            safe_ans(call, f"❌ {len(missing)} channel(s) pending!", True)
             self.ensure(uid, cid)
 
     def _exec(self, uid, cid, p, call):
@@ -2052,10 +2018,6 @@ class FJManager:
 #  PENDING REFERRAL PROCESSING (post-FJ)
 # =================================================================
 def _process_pending_referral(uid):
-    """
-    ✅ FIX: Give referral bonus to referrer ONLY after new user has verified FJ.
-    Idempotent — safe to call multiple times.
-    """
     try:
         u = users_col.find_one({"user_id": uid})
         if not u: return
@@ -2063,7 +2025,6 @@ def _process_pending_referral(uid):
         if not rid: return
         if u.get("referral_credited"): return
         if not referral_enabled(): return
-        # Claim
         res = users_col.find_one_and_update(
             {"user_id": uid, "pending_referrer": rid, "referral_credited": {"$ne": True}},
             {"$set": {"referral_credited": True, "referred_by": rid}},
@@ -2081,32 +2042,22 @@ manager = None
 states = {}
 
 # =================================================================
-#  SEND RESULT — ✅ FIXED: pre-aware splitter + no user msg delete
+#  SEND RESULT
 # =================================================================
 def _split_safe(text, limit=MSG_SAFE_LIMIT):
-    """
-    ✅ FIX: Split at safe boundaries. Never mid-<pre> tag.
-    If we're inside <pre>, we close and reopen it.
-    """
     if len(text) <= limit: return [text]
-
-    # Count pre tags to know if we're inside
     parts = []
     rem = text
-
     while rem:
         if len(rem) <= limit:
             parts.append(rem); break
         chunk = rem[:limit]
-        # Prefer double-newline boundaries
         idx = chunk.rfind('\n\n')
         if idx < limit // 3:
             idx = chunk.rfind('\n')
         if idx < limit // 3:
             idx = limit
         piece = rem[:idx]
-
-        # If piece has unclosed <pre>, close & reopen
         opens = piece.count('<pre>')
         closes = piece.count('</pre>')
         if opens > closes:
@@ -2161,7 +2112,6 @@ def send_result(uid, cid, txt, reply_to=None, reply_markup=None, is_group_msg=Fa
 
     if sent_msgs and group_auto_delete():
         delay = group_auto_delete_seconds()
-        # ✅ FIX: Do NOT delete the user's original message (reply_to)
         delete_ids = list(sent_msgs)
         def _del():
             time.sleep(delay)
@@ -2437,9 +2387,8 @@ def process_tg2num(uid, cid, query, reply_to=None):
 def process_menu(uid, cid, text, reply_to=None):
     upd_last_seen(uid)
     is_admin = is_admin_user(uid)
-    is_group = cid < 0  # ✅ FIX: detect group
+    is_group = cid < 0
 
-    # ✅ FIX: Block admin panel & main menu in groups
     if is_group:
         if text in ("👑 ADMIN PANEL",):
             try:
@@ -2448,7 +2397,6 @@ def process_menu(uid, cid, text, reply_to=None):
             return
         if text == "🔙 Back to Menu":
             bot.send_message(cid, "🏠 Menu private mein /start karein.", reply_to_message_id=reply_to); return
-        # For groups: only show a hint + copy, not the full reply keyboard
         if text in ("📞 Number To Info", "🔒 Username To Info", "🆔 Aadhaar To Info", "🚗 Vehicle Info"):
             states[uid] = {'state': {
                 "📞 Number To Info": 'awaiting_number',
@@ -2460,17 +2408,15 @@ def process_menu(uid, cid, text, reply_to=None):
                 f"📩 <b>{fancy('send your query')}</b>\n\nᴀᴀᴘ ᴅᴀʙᴀʏᴇ <code>{text}</code> — ᴀʙ ᴛʏᴘᴇ ᴋᴀʀᴇɪɴ.",
                 parse_mode='HTML', reply_to_message_id=reply_to)
             return
-        # Other menu items in group: hint to DM
         bot.send_message(cid,
             f"💬 <b>{fancy('private only')}</b>\n\nʏᴇ ꜱᴜᴠɪᴅʜᴀ ᴘʀɪᴠᴀᴛᴇ ᴄʜᴀᴛ ᴍᴇ ʜᴀɪ.\n➡️ @{BOT_USERNAME.replace('@','')}",
             parse_mode='HTML', reply_to_message_id=reply_to)
         return
 
-    # ---- PRIVATE ONLY BELOW ----
     if text == "👑 ADMIN PANEL":
         if not is_admin:
             bot.send_message(cid, "❌ Admin only", reply_to_message_id=reply_to); return
-        txt = (f"👑 <b>{fancy('admin panel v29')}</b>\n{div()}\n"
+        txt = (f"👑 <b>{fancy('admin panel v30')}</b>\n{div()}\n"
                f"ᴡᴇʟᴄᴏᴍᴇ ᴛᴏ ᴛʜᴇ ᴜʟᴛʀᴀ ᴄᴏɴᴛʀᴏʟ ᴄᴇɴᴛᴇʀ")
         bot.send_message(cid, txt, parse_mode='HTML',
             reply_markup=admin_kb(), reply_to_message_id=reply_to); return
@@ -2545,7 +2491,7 @@ def process_menu(uid, cid, text, reply_to=None):
                    f"⏱ ᴜᴘᴛɪᴍᴇ: <b>{hh}h {mm}m</b>\n"
                    f"🛰️ ᴘʏʀᴏɢʀᴀᴍ: <b>{'✅ READY' if _pyro_ready else '🔴 DISABLED'}</b>\n"
                    f"💾 ᴍᴏɴɢᴏ: <b>✅ CONNECTED</b>\n"
-                   f"🐍 ᴠᴇʀꜱɪᴏɴ: <b>v29 FULLY FIXED</b>\n"
+                   f"🐍 ᴠᴇʀꜱɪᴏɴ: <b>v30 FJ FIXED</b>\n"
                    f"👑 ᴀᴅᴍɪɴ: <b>{ADMIN_ID}</b>")
             bot.send_message(cid, txt, parse_mode='HTML',
                 reply_markup=botinfo_kb(), reply_to_message_id=reply_to); return
@@ -2631,7 +2577,7 @@ def process_menu(uid, cid, text, reply_to=None):
         bot.send_message(cid, f"📞 ᴄᴏɴᴛᴀᴄᴛ: {ADMIN_USERNAME}\n\nᴜꜱᴇ /start ꜰᴏʀ ᴍᴇɴᴜ",
             reply_to_message_id=reply_to)
     elif text == "ℹ️ About":
-        about = get_setting("about_text", "") or f"ℹ️ ᴏꜱɪɴᴛ ʙᴏᴛ ᴠ29\n{BOT_USERNAME}"
+        about = get_setting("about_text", "") or f"ℹ️ ᴏꜱɪɴᴛ ʙᴏᴛ ᴠ30\n{BOT_USERNAME}"
         bot.send_message(cid, about, reply_to_message_id=reply_to)
 
 def process_promo(uid, cid, code, reply_to=None):
@@ -2736,14 +2682,9 @@ def _mark_expired(order_id):
     except: pass
 
 def _credit_on_success(uid, cid, order_id, amount, credits, info, msg_id):
-    """
-    ✅ FIX: Idempotent crediting via _credit_payment_atomic.
-    Never double-credits even with racing poller + manual check.
-    """
     p = payments_col.find_one({"order_id": order_id, "user_id": uid, "status": "pending"})
     if not p: return
     utr = (info.get("utr") if info else None) or f"FG_{order_id}"
-    # Move pending → approved atomically
     u = payments_col.find_one_and_update(
         {"_id": p["_id"], "status": "pending"},
         {"$set": {"status": "approved", "approved_at": now(), "utr": utr,
@@ -2751,10 +2692,8 @@ def _credit_on_success(uid, cid, order_id, amount, credits, info, msg_id):
                   "auto_verified": True}},
         return_document=ReturnDocument.AFTER)
     if not u:
-        # Was already processed
         u = payments_col.find_one({"_id": p["_id"]})
     if not u: return
-    # Idempotent credit
     credited_now = _credit_payment_atomic(u)
     if not credited_now:
         logger.info(f"Payment {order_id} already credited")
@@ -2831,7 +2770,6 @@ def cmd_start(m):
         bot.reply_to(m, f"🚫 {fancy('banned')}"); return
     get_or_create_user(uid)
 
-    # ✅ FIX: Referral is DEFERRED (credited only after FJ verify)
     if ' ' in m.text:
         parts = m.text.split()
         if len(parts) > 1 and parts[1].startswith('ref_'):
@@ -2845,7 +2783,6 @@ def cmd_start(m):
 
     if is_group and group_enabled():
         register_group(m.chat.id, m.chat.title, getattr(m.chat, 'username', None))
-        # ✅ FIX: don't send full welcome + reply keyboard in groups
         bot.reply_to(m, f"👋 <b>{fancy('hello')}</b> @{uname}\n\nᴘʀɪᴠᴀᴛᴇ ᴄʜᴀᴛ ᴍᴇ /start ᴋᴀʀᴇɪɴ ᴛᴏ ᴜꜱᴇ ʙᴏᴛ.\n➡️ @{BOT_USERNAME.replace('@','')}",
                      parse_mode='HTML')
         return
@@ -2957,7 +2894,7 @@ def on_join_request(r):
             bot.send_message(uid,
                 f"✅ <b>{fancy('join request received')}</b>\n\n"
                 f"ᴀᴅᴍɪɴ ᴊᴀʟᴅ ʜɪ ᴀᴘᴘʀᴏᴠᴇ ᴋᴀʀᴇɢᴀ.\n"
-                f"ᴛᴀʙ ᴛᴀᴋ ᴀᴀᴘ ʙᴏᴛ ᴜꜱᴇ ᴋᴀʀ ꜱᴀᴋᴛᴇ ʜᴀɪɴ!",
+                f"ᴀᴀᴘ ᴀʙ ʙᴏᴛ ᴜꜱᴇ ᴋᴀʀ ꜱᴀᴋᴛᴇ ʜᴀɪɴ — Verify dabao!",
                 parse_mode='HTML')
         except: pass
     except Exception as e:
@@ -3342,7 +3279,7 @@ def on_left_member(m):
     except: pass
 
 # =================================================================
-#  PHOTO HANDLER — ✅ FIXED: FJ bypass for payment screenshots
+#  PHOTO HANDLER
 # =================================================================
 @bot.message_handler(content_types=['photo'])
 def photo_h(m):
@@ -3351,7 +3288,6 @@ def photo_h(m):
     cache_tg_user(m.from_user); upd_last_seen(uid)
     st = states.get(uid, {}); s = st.get('state')
 
-    # ✅ FIX: Allow payment screenshots even if FJ check would fail (avoid stuck payments)
     payment_states = ('waiting_ss', 'manual_ss')
     if s not in payment_states:
         if m.chat.type == 'private' and not manager.ensure(uid, cid, {"type":"media"}): return
@@ -3444,7 +3380,6 @@ def cb(call):
     cache_tg_user(call.from_user)
     is_admin = is_admin_user(uid)
 
-    # ✅ Always answer the callback to stop the spinner (safe_ans handles errors)
     if d == "adm_back":
         if not is_admin: safe_ans(call); return
         try: bot.delete_message(cid, call.message.message_id)
@@ -4145,7 +4080,7 @@ def cb(call):
 if __name__ == "__main__":
     init_db()
     manager = FJManager(bot)
-    logger.info("🚀 Bot v29 FULLY FIXED starting...")
+    logger.info("🚀 Bot v30 FJ-FIXED starting...")
     init_pyrogram()
     logger.info(f"👑 Admin: {ADMIN_ID}")
     logger.info(f"🛰️ Pyrogram: {'READY' if _pyro_ready else 'DISABLED'}")
@@ -4155,6 +4090,7 @@ if __name__ == "__main__":
     logger.info(f"🎁 Welcome Bonus: {WELCOME_BONUS} CREDITS")
     logger.info(f"⏱ Group Auto-Delete: {GROUP_AUTO_DELETE_SECONDS}s")
     logger.info(f"📢 Force Join: {len(manager.active)} active, {len(manager.inactive)} inactive")
+    logger.info(f"🔓 FJ Grace Period: {FJ_VERIFY_GRACE_HOURS}h")
     resume_pending_orders()
 
     try:
