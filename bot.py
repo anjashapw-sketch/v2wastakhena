@@ -1,13 +1,13 @@
 """
 ================================================================
-  Num Info Bot — v26 FINAL
-  ✅ Force Join DEEP FIX (correct Telegram error handling)
-  ✅ DB-persisted verify status (survives restart)
-  ✅ Admin diagnostic: active/inactive channels
-  ✅ Group me result + 1hr auto-delete
-  ✅ Private channel: no auto-approve (admin manual)
-  ✅ Welcome bonus = 30 credits
-  ✅ Menu buttons skip in text_handler (no double-processing)
+  Num Info Bot — v27 DEEP CLEAN
+  ✅ text_handler filter (menu button double-processing FIXED)
+  ✅ Force Join: proper Telegram error handling
+  ✅ chat_join_request → auto-mark verified
+  ✅ DB-persisted FJ status (survives restart)
+  ✅ Group result + 1hr auto-delete
+  ✅ Welcome bonus = 30 CR
+  ✅ Admin panel: active/inactive channels diagnostics
 ================================================================
 """
 
@@ -48,7 +48,7 @@ def env(k, d):
     return v if v else d
 
 # =================================================================
-#  AESTHETIC TEXT
+#  AESTHETIC
 # =================================================================
 _SMALLCAPS = {
     'a':'ᴀ','b':'ʙ','c':'ᴄ','d':'ᴅ','e':'ᴇ','f':'ғ','g':'ɢ','h':'ʜ',
@@ -61,8 +61,7 @@ _SMALLCAPS = {
 _DIV = "━━━━━━━━━━━━━━━━━━━━"
 _DIV_SOFT = "— — — — — — — — — — — —"
 
-def fancy(text):
-    return "".join(_SMALLCAPS.get(c.lower(), c) for c in str(text))
+def fancy(t): return "".join(_SMALLCAPS.get(c.lower(), c) for c in str(t))
 def div(): return _DIV
 def div_soft(): return _DIV_SOFT
 def fancy_dt(): return now().strftime("%d-%b-%Y %I:%M %p")
@@ -70,53 +69,53 @@ def fancy_dt(): return now().strftime("%d-%b-%Y %I:%M %p")
 # =================================================================
 #  CONFIG
 # =================================================================
-BOT_TOKEN         = env("BOT_TOKEN", "")
-ADMIN_ID          = int(env("ADMIN_ID", "0"))
-BOT_USERNAME      = env("BOT_USERNAME", "@Phoneumber2Info_Robot")
-ADMIN_USERNAME    = env("ADMIN_USERNAME", "@itzanjasha")
+BOT_TOKEN       = env("BOT_TOKEN", "")
+ADMIN_ID        = int(env("ADMIN_ID", "0"))
+BOT_USERNAME    = env("BOT_USERNAME", "@Phoneumber2Info_Robot")
+ADMIN_USERNAME  = env("ADMIN_USERNAME", "@itzanjasha")
 
-TG2NUM_URL        = env("TG2NUM_URL", "https://tg2num-botadminshere.vercel.app/")
-TG2NUM_KEY        = env("TG2NUM_KEY", "")
-TG2NUM_COST       = int(env("TG2NUM_COST", "5"))
+TG2NUM_URL      = env("TG2NUM_URL", "https://tg2num-botadminshere.vercel.app/")
+TG2NUM_KEY      = env("TG2NUM_KEY", "")
+TG2NUM_COST     = int(env("TG2NUM_COST", "5"))
 
-API_URL           = env("API_URL", "")
-API_KEY           = env("API_KEY", "")
-SEARCH_COST       = int(env("SEARCH_COST", "5"))
+API_URL         = env("API_URL", "")
+API_KEY         = env("API_KEY", "")
+SEARCH_COST     = int(env("SEARCH_COST", "5"))
 
-AADHAAR_URL       = env("AADHAAR_URL", "https://apihitech.vercel.app/search")
-AADHAAR_KEY       = env("AADHAAR_KEY", "")
-AADHAAR_COST      = int(env("AADHAAR_COST", "10"))
+AADHAAR_URL     = env("AADHAAR_URL", "https://apihitech.vercel.app/search")
+AADHAAR_KEY     = env("AADHAAR_KEY", "")
+AADHAAR_COST    = int(env("AADHAAR_COST", "10"))
 
-VEHICLE_URL       = env("VEHICLE_URL", "https://rc-x.paskhinpf9.workers.dev/")
-VEHICLE_KEY       = env("VEHICLE_KEY", "")
-VEHICLE_COST      = int(env("VEHICLE_COST", "10"))
+VEHICLE_URL     = env("VEHICLE_URL", "https://rc-x.paskhinpf9.workers.dev/")
+VEHICLE_KEY     = env("VEHICLE_KEY", "")
+VEHICLE_COST    = int(env("VEHICLE_COST", "10"))
 
-WELCOME_BONUS     = int(env("WELCOME_BONUS", "30"))
-REFERRAL_BONUS    = int(env("REFERRAL_BONUS", "10"))
-DAILY_TRIES       = int(env("DAILY_TRIES", "0"))
+WELCOME_BONUS   = int(env("WELCOME_BONUS", "30"))
+REFERRAL_BONUS  = int(env("REFERRAL_BONUS", "10"))
+DAILY_TRIES     = int(env("DAILY_TRIES", "0"))
 
-MONGO_URI         = env("MONGO_URI", "")
-DB_NAME           = env("DB_NAME", "num2info_bot")
+MONGO_URI       = env("MONGO_URI", "")
+DB_NAME         = env("DB_NAME", "num2info_bot")
 
 FORCE_CHANNELS_ENV = env("FORCE_CHANNELS", "")
 CHANNEL_LINKS_ENV  = env("CHANNEL_LINKS", "")
 
-CREDITS_PER_RUPEE  = int(env("CREDITS_PER_RUPEE", "1"))
-MIN_PAYMENT        = int(env("MIN_PAYMENT_AMOUNT", "1"))
-MAX_PAYMENT        = int(env("MAX_PAYMENT_AMOUNT", "50000"))
+CREDITS_PER_RUPEE = int(env("CREDITS_PER_RUPEE", "1"))
+MIN_PAYMENT       = int(env("MIN_PAYMENT_AMOUNT", "1"))
+MAX_PAYMENT       = int(env("MAX_PAYMENT_AMOUNT", "50000"))
 
-UPI_MANUAL_ID      = env("UPI_MANUAL_ID", "")
-UPI_MANUAL_QR      = env("UPI_MANUAL_QR", "")
+UPI_MANUAL_ID     = env("UPI_MANUAL_ID", "")
+UPI_MANUAL_QR     = env("UPI_MANUAL_QR", "")
 
-FAM_CREATE_URL     = env("FAM_CREATE_URL", "")
-FAM_VERIFY_URL     = env("FAM_VERIFY_URL", "")
-FAM_CHECKOUT_URL   = env("FAM_CHECKOUT_STATUS_URL", "")
-FAM_API_KEY        = env("FAM_API_KEY", "")
-FAM_REDIRECT_URL   = env("FAM_REDIRECT_URL", "")
+FAM_CREATE_URL    = env("FAM_CREATE_URL", "")
+FAM_VERIFY_URL    = env("FAM_VERIFY_URL", "")
+FAM_CHECKOUT_URL  = env("FAM_CHECKOUT_STATUS_URL", "")
+FAM_API_KEY       = env("FAM_API_KEY", "")
+FAM_REDIRECT_URL  = env("FAM_REDIRECT_URL", "")
 
-PYRO_API_ID        = int(env("PYRO_API_ID", "0"))
-PYRO_API_HASH      = env("PYRO_API_HASH", "")
-PYRO_SESSION       = env("PYRO_SESSION", "")
+PYRO_API_ID       = int(env("PYRO_API_ID", "0"))
+PYRO_API_HASH     = env("PYRO_API_HASH", "")
+PYRO_SESSION      = env("PYRO_SESSION", "")
 
 WELCOME_EMOJIS = ["🌟","🚀","💫","🌈","🔥","⚡","🎯","💎","🌸","✨","🎉","💪","⭐","🦋","🍀"]
 ORDER_LIFETIME = 300
@@ -127,13 +126,9 @@ GROUP_AUTO_DELETE_SECONDS = 3600
 if not BOT_TOKEN: logger.critical("❌ BOT_TOKEN missing"); sys.exit(1)
 if not MONGO_URI: logger.critical("❌ MONGO_URI missing"); sys.exit(1)
 
-# =================================================================
-#  HELPERS
-# =================================================================
 def mask_secret(s, secret):
     if not secret or not s: return s
-    try:
-        return str(s).replace(str(secret), "***")
+    try: return str(s).replace(str(secret), "***")
     except: return s
 
 # =================================================================
@@ -202,23 +197,14 @@ def init_db():
         "group_welcome": "👋 Bot added! Type /start to begin.",
         "group_auto_delete": 1,
         "group_auto_delete_seconds": GROUP_AUTO_DELETE_SECONDS,
-        "broadcast_pin": 0,
-        "broadcast_forward": 0,
-        "welcome_emoji": "",
-        "powered_by": "",
-        "about_text": "",
-        "api_url_env": API_URL,
-        "api_key_env": API_KEY,
-        "tg2num_url_env": TG2NUM_URL,
-        "tg2num_key_env": TG2NUM_KEY,
-        "aadhaar_url_env": AADHAAR_URL,
-        "aadhaar_key_env": AADHAAR_KEY,
-        "vehicle_url_env": VEHICLE_URL,
-        "vehicle_key_env": VEHICLE_KEY,
-        "welcome_media": "",
-        "welcome_media_type": "",
-        "support_link": "",
-        "upi_extra_note": "",
+        "broadcast_pin": 0, "broadcast_forward": 0,
+        "welcome_emoji": "", "powered_by": "", "about_text": "",
+        "api_url_env": API_URL, "api_key_env": API_KEY,
+        "tg2num_url_env": TG2NUM_URL, "tg2num_key_env": TG2NUM_KEY,
+        "aadhaar_url_env": AADHAAR_URL, "aadhaar_key_env": AADHAAR_KEY,
+        "vehicle_url_env": VEHICLE_URL, "vehicle_key_env": VEHICLE_KEY,
+        "welcome_media": "", "welcome_media_type": "",
+        "support_link": "", "upi_extra_note": "",
         "fj_custom_msg": "",
         "aadhaar_live_url": "https://apihitech.vercel.app/search?q=",
     }
@@ -249,25 +235,19 @@ def set_setting(k, v):
 
 def log_action(admin_id, action, details=None):
     try:
-        logs_col.insert_one({
-            "admin_id": admin_id, "action": action,
-            "details": details or "", "at": now()
-        })
+        logs_col.insert_one({"admin_id": admin_id, "action": action,
+            "details": details or "", "at": now()})
     except: pass
 
-def is_main_admin(uid):
-    return uid == ADMIN_ID
-
+def is_main_admin(uid): return uid == ADMIN_ID
 def is_sub_admin(uid):
     if uid == ADMIN_ID: return True
     try: return admins_col.find_one({"user_id": uid}) is not None
     except: return False
-
-def is_admin_user(uid):
-    return uid == ADMIN_ID or is_sub_admin(uid)
+def is_admin_user(uid): return uid == ADMIN_ID or is_sub_admin(uid)
 
 # =================================================================
-#  USER + TRIES
+#  USER
 # =================================================================
 def today_str(): return now().strftime("%Y-%m-%d")
 
@@ -303,12 +283,10 @@ def deduct_credits(uid, amt):
         res = users_col.find_one_and_update(
             {"user_id": uid, "credits": {"$gte": amt}},
             {"$inc": {"credits": -amt}},
-            return_document=ReturnDocument.AFTER
-        )
+            return_document=ReturnDocument.AFTER)
         return res is not None
     except Exception as e:
-        logger.error(f"deduct_credits: {e}")
-        return False
+        logger.error(f"deduct_credits: {e}"); return False
 
 def incr_searches(uid):
     try: users_col.update_one({"user_id": uid}, {"$inc": {"searches": 1}})
@@ -336,17 +314,14 @@ def consume_try(uid):
         today = today_str()
         users_col.update_one(
             {"user_id": uid, "tries_date": {"$ne": today}},
-            {"$set": {"tries_used": 0, "tries_date": today}}
-        )
+            {"$set": {"tries_used": 0, "tries_date": today}})
         res = users_col.find_one_and_update(
             {"user_id": uid, "tries_used": {"$lt": limit}},
             {"$inc": {"tries_used": 1}},
-            return_document=ReturnDocument.AFTER
-        )
+            return_document=ReturnDocument.AFTER)
         return res is not None
     except Exception as e:
-        logger.error(f"consume_try: {e}")
-        return True
+        logger.error(f"consume_try: {e}"); return True
 
 def tries_display(uid):
     r = get_tries_remaining(uid)
@@ -367,7 +342,7 @@ def is_banned(uid):
         return u and u.get("banned", 0) == 1
     except: return False
 
-# ⭐ NEW: FJ verified persistence
+# ⭐ FJ persistence
 def is_fj_verified(uid):
     try:
         u = users_col.find_one({"user_id": uid}, {"fj_verified": 1})
@@ -375,12 +350,13 @@ def is_fj_verified(uid):
     except: return False
 
 def mark_fj_verified(uid):
-    try:
-        users_col.update_one({"user_id": uid}, {"$set": {"fj_verified": True}}, upsert=True)
+    try: users_col.update_one({"user_id": uid},
+        {"$set": {"fj_verified": True}}, upsert=True)
     except: pass
 
 def unmark_fj_verified(uid):
-    try: users_col.update_one({"user_id": uid}, {"$set": {"fj_verified": False}})
+    try: users_col.update_one({"user_id": uid},
+        {"$set": {"fj_verified": False}})
     except: pass
 
 def ban_user(uid):
@@ -437,11 +413,9 @@ def export_csv():
 # =================================================================
 def register_group(chat_id, title, username=None):
     try:
-        groups_col.update_one(
-            {"chat_id": chat_id},
+        groups_col.update_one({"chat_id": chat_id},
             {"$set": {"title": title, "username": username, "last_seen": now()},
-             "$setOnInsert": {"added_at": now(), "enabled": 1}},
-            upsert=True)
+             "$setOnInsert": {"added_at": now(), "enabled": 1}}, upsert=True)
     except: pass
 
 def remove_group(chat_id):
@@ -622,15 +596,11 @@ def query_aadhaar(aadhaar):
     try:
         base = str(a_url).strip()
         a = re.sub(r'\D', '', str(aadhaar))
-        if base.endswith('='):
-            url = f"{base}{a}"
+        if base.endswith('='): url = f"{base}{a}"
         elif '?' in base:
-            if 'q=' in base or 'aadhaar=' in base:
-                url = f"{base}{a}"
-            else:
-                url = f"{base}&q={a}"
-        else:
-            url = f"{base}?q={a}"
+            if 'q=' in base or 'aadhaar=' in base: url = f"{base}{a}"
+            else: url = f"{base}&q={a}"
+        else: url = f"{base}?q={a}"
         if a_key:
             sep = '&' if '?' in url else '?'
             url += f"{sep}key={a_key}"
@@ -645,12 +615,9 @@ def query_aadhaar(aadhaar):
             return False, None, "Invalid JSON"
         logger.info(f"🆔 Aadhaar resp: {json.dumps(data, default=str)[:500]}")
         if isinstance(data, dict):
-            if data.get("success") is False:
-                return False, None, data.get("message", "Not found")
-            if data.get("status") in ("error", "fail", "failed"):
-                return False, None, data.get("message", "Not found")
-            if data.get("error"):
-                return False, None, str(data.get("error"))
+            if data.get("success") is False: return False, None, data.get("message", "Not found")
+            if data.get("status") in ("error", "fail", "failed"): return False, None, data.get("message", "Not found")
+            if data.get("error"): return False, None, str(data.get("error"))
         return True, data, None
     except requests.exceptions.Timeout: return False, None, "Timeout"
     except Exception as e: return False, None, str(e)
@@ -662,14 +629,10 @@ def query_vehicle(vehicle):
     try:
         base = str(v_url).strip()
         v = re.sub(r'[\s\-]', '', str(vehicle)).upper()
-        if base.endswith('='):
-            url = f"{base}{requests.utils.quote(v)}"
-        elif 'vehicle=' in base:
-            url = f"{base}{requests.utils.quote(v)}"
-        elif '?' in base:
-            url = f"{base}&vehicle={requests.utils.quote(v)}"
-        else:
-            url = f"{base}?vehicle={requests.utils.quote(v)}"
+        if base.endswith('='): url = f"{base}{requests.utils.quote(v)}"
+        elif 'vehicle=' in base: url = f"{base}{requests.utils.quote(v)}"
+        elif '?' in base: url = f"{base}&vehicle={requests.utils.quote(v)}"
+        else: url = f"{base}?vehicle={requests.utils.quote(v)}"
         if v_key:
             sep = '&' if '?' in url else '?'
             url += f"{sep}key={v_key}"
@@ -684,12 +647,9 @@ def query_vehicle(vehicle):
             return False, None, "Invalid JSON"
         logger.info(f"🚗 Vehicle resp: {json.dumps(data, default=str)[:500]}")
         if isinstance(data, dict):
-            if data.get("success") is False:
-                return False, None, data.get("message", "Not found")
-            if data.get("status") in ("error", "fail", "failed"):
-                return False, None, data.get("message", "Not found")
-            if data.get("error"):
-                return False, None, str(data.get("error"))
+            if data.get("success") is False: return False, None, data.get("message", "Not found")
+            if data.get("status") in ("error", "fail", "failed"): return False, None, data.get("message", "Not found")
+            if data.get("error"): return False, None, str(data.get("error"))
         return True, data, None
     except requests.exceptions.Timeout: return False, None, "Timeout"
     except Exception as e: return False, None, str(e)
@@ -716,8 +676,7 @@ def query_tg2num_id(tg_id):
         if not data.get("success"):
             return False, None, data.get("message", "API returned success=false")
         result = data.get("result")
-        if isinstance(result, list) and result:
-            result = result[0]
+        if isinstance(result, list) and result: result = result[0]
         if not isinstance(result, dict) or not result.get("number"):
             return False, None, "No number in result"
         return True, result, None
@@ -776,7 +735,7 @@ def resolve_any(query):
     return None, None
 
 # =================================================================
-#  PAYMENTS / PROMO
+#  PAYMENTS
 # =================================================================
 def create_payment(uid, cid, amount, credits, pay_mode, screenshot_id=None,
                     order_id=None, payment_link=None, gateway_raw=None):
@@ -887,16 +846,14 @@ def redeem_promo(code, uid):
              "used_count": {"$lt": d.get("max_users", 0)},
              "used_by": {"$ne": uid}},
             {"$inc": {"used_count": 1}, "$push": {"used_by": uid}},
-            return_document=ReturnDocument.AFTER
-        )
+            return_document=ReturnDocument.AFTER)
         if not res:
             return -1 if uid in d.get("used_by", []) else None
         r = res.get("reward_credits", 0)
         add_credits(uid, r)
         return r
     except Exception as e:
-        logger.error(f"redeem_promo: {e}")
-        return None
+        logger.error(f"redeem_promo: {e}"); return None
 
 def all_channels():
     try: return list(channels_col.find({"enabled": 1}))
@@ -994,12 +951,9 @@ def send_typing(cid):
 
 def safe_ans(call, text=None, alert=False):
     try:
-        if text is None:
-            bot.answer_callback_query(call.id)
-        else:
-            bot.answer_callback_query(call.id, text, show_alert=alert)
-    except:
-        pass
+        if text is None: bot.answer_callback_query(call.id)
+        else: bot.answer_callback_query(call.id, text, show_alert=alert)
+    except: pass
 
 # =================================================================
 #  FOOTER
@@ -1141,7 +1095,7 @@ def stg_verify(): return [
     {"label": "Confirming UTR",         "emojis": ["🏦","🔐","✔️"], "duration": 1.5}]
 
 # =================================================================
-#  NO-DATA / LOW-CREDIT / NO-TRIES
+#  NO-DATA / LOW-CREDIT
 # =================================================================
 def no_data_msg(uid, svc="number"):
     if svc == "number": line = "ᴛʜɪꜱ ɴᴜᴍʙᴇʀ ɪꜱ ɴᴏᴛ ɪɴ ᴏᴜʀ ᴅᴀᴛᴀꜱᴇᴛꜱ."
@@ -1166,9 +1120,8 @@ def low_credit_text(uid, need, have):
 
 def low_credit_kb(uid):
     kb = InlineKeyboardMarkup(row_width=2)
-    kb.row(
-        InlineKeyboardButton("🎁 ʀᴇꜰᴇʀ & ᴇᴀʀɴ", callback_data=f"copyref_{uid}"),
-        InlineKeyboardButton("💳 ʙᴜʏ ᴄʀᴇᴅɪᴛꜱ", callback_data="buy"))
+    kb.row(InlineKeyboardButton("🎁 ʀᴇꜰᴇʀ & ᴇᴀʀɴ", callback_data=f"copyref_{uid}"),
+           InlineKeyboardButton("💳 ʙᴜʏ ᴄʀᴇᴅɪᴛꜱ", callback_data="buy"))
     return kb
 
 # =================================================================
@@ -1179,16 +1132,11 @@ def extract_phone_digits(text):
     d = re.sub(r'\D', '', str(text))
     if not d: return None
     if d.startswith("00"): d = d[2:]
-    if len(d) == 12 and d.startswith("91") and d[2] in "6789":
-        return d[2:]
-    if len(d) == 11 and d.startswith("0") and d[1] in "6789":
-        return d[1:]
-    if len(d) == 13 and d.startswith("091") and d[3] in "6789":
-        return d[3:]
-    if len(d) == 10 and d[0] in "6789":
-        return d
-    if len(d) > 10 and d[-10] in "6789":
-        return d[-10:]
+    if len(d) == 12 and d.startswith("91") and d[2] in "6789": return d[2:]
+    if len(d) == 11 and d.startswith("0") and d[1] in "6789": return d[1:]
+    if len(d) == 13 and d.startswith("091") and d[3] in "6789": return d[3:]
+    if len(d) == 10 and d[0] in "6789": return d
+    if len(d) > 10 and d[-10] in "6789": return d[-10:]
     return None
 
 def is_vehicle_number(text):
@@ -1225,16 +1173,14 @@ def classify_input(text):
         d = re.sub(r'\D', '', t)
         if 5 <= len(d) <= 15: return "tgid", d
         return None, None
-    if is_vehicle_number(t):
-        return "vehicle", re.sub(r'[\s\-]', '', t).upper()
+    if is_vehicle_number(t): return "vehicle", re.sub(r'[\s\-]', '', t).upper()
     if re.match(r'^[\+\d\s\-\(\)]+$', t):
         phone = extract_phone_digits(t)
         if phone: return "number", phone
         d = re.sub(r'\D', '', t)
         if 5 <= len(d) <= 15: return "tgid", d
         return None, None
-    if re.match(r'^[a-zA-Z][a-zA-Z0-9_]{4,31}$', t):
-        return "username", t
+    if re.match(r'^[a-zA-Z][a-zA-Z0-9_]{4,31}$', t): return "username", t
     return None, None
 
 def is_maintenance(): return int(get_setting("maintenance_mode", 0)) == 1
@@ -1251,8 +1197,7 @@ def normalize_phone(num, cc=None):
     cc_d = re.sub(r'\D', '', str(cc or ""))
     if n.startswith("00"): n = n[2:]
     if cc_d:
-        if n.startswith(cc_d) and len(n) > len(cc_d):
-            return n
+        if n.startswith(cc_d) and len(n) > len(cc_d): return n
         return f"{cc_d}{n}"
     if len(n) == 10 and n[0] in "6789": return f"91{n}"
     return n
@@ -1312,8 +1257,7 @@ def _clean_val(v):
 
 def _extract_number_records(data):
     if not isinstance(data, dict):
-        if isinstance(data, list):
-            return [x for x in data if isinstance(x, dict)]
+        if isinstance(data, list): return [x for x in data if isinstance(x, dict)]
         return []
     if "result" in data:
         res = data["result"]
@@ -1351,13 +1295,11 @@ def record_to_json_dict(rec):
     low = {k.lower(): v for k, v in rec.items() if isinstance(k, str)}
     covered = set()
     for key, _ in mapping:
-        for a in _FIELD_ALIASES.get(key, (key,)):
-            covered.add(a.lower())
+        for a in _FIELD_ALIASES.get(key, (key,)): covered.add(a.lower())
     for k, v in low.items():
         if k in covered: continue
         cv = _clean_val(v)
-        if cv and k not in out:
-            out[k] = cv
+        if cv and k not in out: out[k] = cv
     return out
 
 def build_json_text(records, query_info=None):
@@ -1373,7 +1315,7 @@ def build_json_text(records, query_info=None):
     return json.dumps(payload, indent=2, ensure_ascii=False)
 
 # =================================================================
-#  KEYBOARDS - USER
+#  USER KEYBOARDS
 # =================================================================
 def main_kb(uid):
     ia = is_admin_user(uid)
@@ -1384,8 +1326,7 @@ def main_kb(uid):
     kb.row(KeyboardButton("🎟 Redeem Code"), KeyboardButton("👤 My Profile"))
     kb.row(KeyboardButton("➕ Add Me To Group"), KeyboardButton("❓ Help"))
     kb.row(KeyboardButton("ℹ️ About"))
-    if ia:
-        kb.row(KeyboardButton("👑 ADMIN PANEL"))
+    if ia: kb.row(KeyboardButton("👑 ADMIN PANEL"))
     return kb
 
 # =================================================================
@@ -1498,18 +1439,18 @@ def broadcast_settings_kb():
 def force_kb():
     en = manager.global_enabled if manager else False
     st = "✅ ON" if en else "❌ OFF"
-    ch_count = len(manager.channels) if manager else 0
-    in_count = len(manager.inactive) if manager else 0
+    active = len(manager.channels) if manager else 0
+    inactive = len(manager.inactive) if manager else 0
     kb = InlineKeyboardMarkup(row_width=2)
     kb.row(InlineKeyboardButton(f"🔄 Toggle ({st})", callback_data="fj_toggle"))
     kb.row(InlineKeyboardButton("➕ Add Channel", callback_data="fj_add"),
            InlineKeyboardButton("➖ Remove Channel", callback_data="fj_remove"))
-    kb.row(InlineKeyboardButton(f"📋 List ({ch_count}✅/{in_count}⚠️)", callback_data="fj_list"),
+    kb.row(InlineKeyboardButton(f"📋 List ({active}✅/{inactive}⚠️)", callback_data="fj_list"),
            InlineKeyboardButton("📊 FJ Stats", callback_data="fj_stats"))
     kb.row(InlineKeyboardButton("🔄 Recheck Channels", callback_data="fj_recheck"))
     kb.row(InlineKeyboardButton("✏️ Custom Message", callback_data="fj_set_msg"))
     kb.row(InlineKeyboardButton("🔄 Reset User Verify", callback_data="fj_reset_user"))
-    kb.row(InlineKeyboardButton("🧪 Test Prompt Preview", callback_data="fj_test"))
+    kb.row(InlineKeyboardButton("🧪 Test Prompt", callback_data="fj_test"))
     kb.row(InlineKeyboardButton("🔙 Back", callback_data="adm_back"))
     return kb
 
@@ -1715,22 +1656,24 @@ def welcome_txt(uid, uname):
             f"🚗 ᴠᴇʜɪᴄʟᴇ — {get_setting('vehicle_cost',10)}ᴄʀ\n\n{e}")
 
 # =================================================================
-#  FORCE JOIN MANAGER — v26 DEEP FIX
+#  FORCE JOIN MANAGER — v27 DEEP CLEAN
 # =================================================================
 class FJManager:
     """
-    v26 FIXED Force Join Manager:
-    - Correct Telegram error string handling ('user not found')
-    - Lenient on bot-side errors (don't block legit users)
-    - DB-persisted verify status (survives bot restart)
-    - Active/Inactive channel tracking with diagnostics
+    v27 FINAL:
+    - All channels in DB → shown in prompt
+    - Active (bot admin) → strict check
+    - Inactive (bot not admin) → lenient (skip on verify)
+    - Private channel → pass if user clicked Verify OR sent join request
+    - DB-persisted
     """
     def __init__(self, bot):
         self.bot = bot
         self.pending = {}
         self.msg = {}
-        self.channels = []       # Active: bot is admin
-        self.inactive = []       # Bot can't use (not admin / deleted)
+        self.channels = []   # List of (cid, link) — ALL channels for prompt
+        self.active = []     # (cid, link) where bot is admin
+        self.inactive = []   # (cid, link, reason)
         self.global_enabled = False
         self._load()
 
@@ -1739,32 +1682,37 @@ class FJManager:
             bi = self.bot.get_me()
         except Exception as e:
             logger.error(f"❌ FJ _load: get_me failed: {e}")
-            self.channels = []; self.inactive = []; self.global_enabled = False
+            self.channels = []; self.active = []; self.inactive = []
+            self.global_enabled = False
             return
 
-        active, inactive = [], []
+        all_chs = []
+        active = []
+        inactive = []
         for c in all_channels():
             cid = c.get("channel_id")
             link = c.get("channel_link") or ""
+            all_chs.append((cid, link))
+            # Try to check if bot is admin
             try:
                 m = self.bot.get_chat_member(cid, bi.id)
                 if m.status in ('administrator', 'creator'):
                     active.append((cid, link))
                 else:
-                    inactive.append((cid, link, f"bot is {m.status}"))
-                    logger.warning(f"⚠️ FJ: bot is '{m.status}' in {cid} (needs admin)")
+                    inactive.append((cid, link, f"bot is '{m.status}'"))
+                    logger.warning(f"⚠️ FJ: bot is '{m.status}' in {cid} → FJ lenient for this channel")
             except Exception as e:
                 err = str(e)
-                inactive.append((cid, link, err[:120]))
-                logger.warning(f"⚠️ FJ: cannot verify {cid}: {err[:150]}")
+                inactive.append((cid, link, err[:100]))
+                logger.warning(f"⚠️ FJ: cannot check {cid}: {err[:150]}")
 
-        self.channels = active
-        self.inactive = inactive
+        self.channels = all_chs      # ALL channels for prompt
+        self.active = active         # Bot is admin — strict
+        self.inactive = inactive     # Bot not admin — lenient
         self.global_enabled = str(get_setting("force_enabled", "1")) == "1"
-        logger.info(f"✅ FJ loaded: {len(active)} active, {len(inactive)} inactive, enabled={self.global_enabled}")
+        logger.info(f"✅ FJ: {len(all_chs)} total, {len(active)} active, {len(inactive)} inactive, enabled={self.global_enabled}")
 
-    def reload(self):
-        self._load()
+    def reload(self): self._load()
 
     def is_on(self):
         return self.global_enabled and bool(self.channels)
@@ -1777,9 +1725,6 @@ class FJManager:
         """
         Returns None if all OK.
         Returns list of (cid, link) if user must join.
-
-        PRIVATE channel: skip if user ever clicked Verify (assumes request sent).
-        PUBLIC channel: strict get_chat_member check.
         """
         if not self.is_on(): return None
         if is_admin_user(uid): return None
@@ -1787,47 +1732,41 @@ class FJManager:
         missing = []
         verified = is_fj_verified(uid)
 
-        for cid, link in self.channels:
+        # ⭐ STRICT check for ACTIVE channels (bot admin)
+        for cid, link in self.active:
             is_priv = self._is_private(link)
 
             if is_priv:
-                # Private: only block if user never clicked Verify
+                # Private: user needs to have clicked Verify (sent request)
                 if not verified:
                     missing.append((cid, link))
                 continue
 
-            # Public: strict check
+            # Public: strict get_chat_member
             try:
                 m = self.bot.get_chat_member(cid, uid)
-                is_in = False
-                if m.status in ('member', 'administrator', 'creator'):
-                    is_in = True
-                elif m.status == 'restricted':
-                    is_in = bool(getattr(m, 'is_member', False))
-                if not is_in:
+                status = m.status
+                is_member = status in ('member', 'administrator', 'creator')
+                if status == 'restricted' and getattr(m, 'is_member', False):
+                    is_member = True
+                if not is_member:
                     missing.append((cid, link))
             except Exception as e:
                 err = str(e).lower()
-                # ⭐ CRITICAL FIX: correct Telegram error strings
+                # ⭐ CORRECT Telegram error strings
                 if ('user not found' in err or
                     'user_not_participant' in err or
-                    'user not participant' in err or
                     'participant not found' in err or
                     'user_not_found' in err):
                     missing.append((cid, link))
-                    logger.info(f"FJ: user {uid} NOT member of {cid}")
-                # Bot-side errors → skip (don't block legit users)
-                elif ('chat_admin_required' in err or
-                      'chat not found' in err or
-                      'peer_id_invalid' in err or
-                      'chat_not_found' in err or
-                      'not enough rights' in err):
-                    logger.warning(f"FJ skip {cid} (bot-side): {e}")
-                    continue
                 else:
-                    # Unknown → BLOCK (safer)
-                    logger.warning(f"FJ block {cid} (unknown err): {e}")
-                    missing.append((cid, link))
+                    # Bot-side error (chat not found, etc.) → skip
+                    logger.warning(f"FJ skip {cid}: {e}")
+                    continue
+
+        # ⭐ LENIENT check for INACTIVE channels (bot not admin, can't verify)
+        # Only show prompt, but never block on these
+        # (User is trusted to have joined)
 
         return missing if missing else None
 
@@ -1853,9 +1792,15 @@ class FJManager:
         missing = self.check(uid)
         if not missing: return True
 
+        # Build prompt with ALL channel links (active + inactive)
         kb = InlineKeyboardMarkup(row_width=1)
-        for i, (ch, lk) in enumerate(missing[:100]):
-            kb.add(InlineKeyboardButton(f"📢 Channel {i+1}", url=lk))
+        seen = set()
+        idx = 0
+        for cid_, lk in self.channels:
+            if cid_ in seen: continue
+            seen.add(cid_)
+            idx += 1
+            kb.add(InlineKeyboardButton(f"📢 Channel {idx}", url=lk))
         kb.add(InlineKeyboardButton("✅ Verify", callback_data="force_verify"))
 
         custom_msg = get_setting("fj_custom_msg", "")
@@ -1902,7 +1847,7 @@ class FJManager:
                 settings_col.update_one({"key": "fj_stats_verifies"},
                     {"$inc": {"value": 1}}, upsert=True)
             except: pass
-            # Notify admin (info only)
+            # Notify admin
             try:
                 bot.send_message(ADMIN_ID,
                     f"✅ <b>FJ Verified</b>\n"
@@ -1941,21 +1886,19 @@ class FJManager:
         return not cur
 
     def add(self, cid, link=None):
-        if not link:
-            return False, "Invite link required"
-        if not link.startswith("http"):
-            return False, "Invalid link (must start with http)"
+        if not link: return False, "Invite link required"
+        if not link.startswith("http"): return False, "Invalid link (must start with http)"
         try:
             bi = self.bot.get_me()
             m = self.bot.get_chat_member(cid, bi.id)
             if m.status not in ('administrator', 'creator'):
-                return False, f"Bot is '{m.status}' — make it admin first"
+                # Still add, but warn
+                logger.warning(f"⚠️ Bot is '{m.status}' in {cid} — FJ will be lenient")
         except Exception as e:
-            return False, f"Cannot verify: {str(e)[:80]}"
-        if not add_channel_db(cid, link):
-            return False, "Already exists"
+            logger.warning(f"⚠️ Cannot verify bot admin: {e}")
+        if not add_channel_db(cid, link): return False, "Already exists"
         self.reload()
-        return True, "Added & Active ✅"
+        return True, "Added ✅"
 
     def rm(self, cid):
         if remove_channel_db(cid):
@@ -1972,10 +1915,12 @@ class FJManager:
                 "blocks": blocks.get("value", 0) if blocks else 0,
                 "verifies": verifies.get("value", 0) if verifies else 0,
                 "verified_users": verified_count,
-                "active": len(self.channels),
+                "total": len(self.channels),
+                "active": len(self.active),
                 "inactive": len(self.inactive),
             }
-        except: return {"blocks": 0, "verifies": 0, "verified_users": 0, "active": 0, "inactive": 0}
+        except: return {"blocks": 0, "verifies": 0, "verified_users": 0,
+                        "total": 0, "active": 0, "inactive": 0}
 
 manager = None
 states = {}
@@ -1992,15 +1937,13 @@ def _split_safe(text, limit=MSG_SAFE_LIMIT):
             parts.append(rem); break
         chunk = rem[:limit]
         idx = chunk.rfind('\n')
-        if idx < limit // 2:
-            idx = limit
+        if idx < limit // 2: idx = limit
         parts.append(rem[:idx])
         rem = rem[idx:]
     return parts
 
 def send_result(uid, cid, txt, reply_to=None, reply_markup=None, is_group_msg=False):
     is_private = (cid == uid or cid > 0)
-
     if is_private:
         parts = _split_safe(txt, MSG_SAFE_LIMIT)
         sent_any = False
@@ -2066,8 +2009,7 @@ def process_number(uid, cid, phone, reply_to=None):
     if not clean:
         bot.send_message(cid,
             f"❌ <b>{fancy('invalid number')}</b>\n\nᴘʟᴇᴀꜱᴇ ꜱᴇɴᴅ ᴀ ᴠᴀʟɪᴅ 10-ᴅɪɢɪᴛ ɪɴᴅɪᴀɴ ᴍᴏʙɪʟᴇ ɴᴜᴍʙᴇʀ.\nᴇx: <code>9876543210</code>",
-            parse_mode='HTML', reply_to_message_id=reply_to)
-        return
+            parse_mode='HTML', reply_to_message_id=reply_to); return
     phone = clean
     cost = int(get_setting("search_cost", 5))
     is_priv = is_admin_user(uid)
@@ -2096,8 +2038,7 @@ def process_number(uid, cid, phone, reply_to=None):
         if not deduct_credits(uid, cost):
             am.edit(err_frame("ERROR", low_credit_text(uid, cost, get_credits(uid)))); return
         remaining = get_credits(uid)
-    else:
-        remaining = "♾️"
+    else: remaining = "♾️"
     incr_searches(uid)
     am.flash_complete(); am.delete()
 
@@ -2157,8 +2098,7 @@ def process_aadhaar(uid, cid, aadhaar, reply_to=None):
         if not deduct_credits(uid, cost):
             am.edit(err_frame("ERROR", low_credit_text(uid, cost, get_credits(uid)))); return
         remaining = get_credits(uid)
-    else:
-        remaining = "♾️"
+    else: remaining = "♾️"
     incr_searches(uid)
     am.flash_complete(); am.delete()
 
@@ -2220,8 +2160,7 @@ def process_vehicle(uid, cid, vehicle, reply_to=None):
         if not deduct_credits(uid, cost):
             am.edit(err_frame("ERROR", low_credit_text(uid, cost, get_credits(uid)))); return
         remaining = get_credits(uid)
-    else:
-        remaining = "♾️"
+    else: remaining = "♾️"
     incr_searches(uid)
     am.flash_complete(); am.delete()
 
@@ -2262,7 +2201,6 @@ def process_tg2num(uid, cid, query, reply_to=None):
     send_typing(cid)
     am = AnimMsg(cid, stages=stg_tg(), title="USERNAME SEARCH", reply_to=reply_to)
     am.start()
-
     resolved, src = resolve_any(query)
     tg_id = None
     if resolved and resolved.get("user_id"):
@@ -2287,8 +2225,7 @@ def process_tg2num(uid, cid, query, reply_to=None):
         if not deduct_credits(uid, cost):
             am.edit(err_frame("ERROR", low_credit_text(uid, cost, get_credits(uid)))); return
         remaining = get_credits(uid)
-    else:
-        remaining = "♾️"
+    else: remaining = "♾️"
     incr_searches(uid)
     am.flash_complete(); am.delete()
 
@@ -2317,7 +2254,6 @@ def process_tg2num(uid, cid, query, reply_to=None):
         wa_url = f"https://wa.me/{full_number}?text={requests.utils.quote(wa_msg)}"
         reply_markup = InlineKeyboardMarkup(row_width=1)
         reply_markup.row(InlineKeyboardButton("💬 ᴡʜᴀᴛꜱᴀᴘᴘ", url=wa_url))
-
     send_result(uid, cid, "\n".join(lines), reply_to=reply_to, reply_markup=reply_markup)
 
 # =================================================================
@@ -2330,7 +2266,7 @@ def process_menu(uid, cid, text, reply_to=None):
     if text == "👑 ADMIN PANEL":
         if not is_admin:
             bot.send_message(cid, "❌ Admin only", reply_to_message_id=reply_to); return
-        txt = (f"👑 <b>{fancy('admin panel v26')}</b>\n{div()}\n"
+        txt = (f"👑 <b>{fancy('admin panel v27')}</b>\n{div()}\n"
                f"ᴡᴇʟᴄᴏᴍᴇ ᴛᴏ ᴛʜᴇ ᴜʟᴛʀᴀ ᴄᴏɴᴛʀᴏʟ ᴄᴇɴᴛᴇʀ")
         bot.send_message(cid, txt, parse_mode='HTML',
             reply_markup=admin_kb(), reply_to_message_id=reply_to); return
@@ -2347,7 +2283,7 @@ def process_menu(uid, cid, text, reply_to=None):
                    f"🆕 ɴᴇᴡ (24ʜ): <b>{new_users_24h()}</b>\n"
                    f"👥 ɢʀᴏᴜᴘꜱ: <b>{group_count()}</b>\n"
                    f"🔍 ꜱᴇᴀʀᴄʜᴇꜱ: <b>{total_searches()}</b>\n"
-                   f"💾 ᴄᴀᴄʜᴇᴅ: <b>{tg_users_col.count_documents({})}</b>\n\n"
+                   f"✅ ꜰᴊ ᴠᴇʀɪꜰɪᴇᴅ: <b>{users_col.count_documents({'fj_verified': True})}</b>\n\n"
                    f"💰 ᴘᴇɴᴅɪɴɢ: <b>{p}</b> | ✅ <b>{a}</b> | ❌ <b>{r}</b>\n"
                    f"💵 ᴛᴏᴛᴀʟ ʀᴇᴠᴇɴᴜᴇ: <b>₹{rev}</b>\n"
                    f"📈 ʀᴇᴠ (24ʜ): <b>₹{revenue_24h()}</b>\n"
@@ -2416,7 +2352,7 @@ def process_menu(uid, cid, text, reply_to=None):
                    f"⏱ ᴜᴘᴛɪᴍᴇ: <b>{hh}h {mm}m</b>\n"
                    f"🛰️ ᴘʏʀᴏɢʀᴀᴍ: <b>{'✅ READY' if _pyro_ready else '🔴 DISABLED'}</b>\n"
                    f"💾 ᴍᴏɴɢᴏ: <b>✅ CONNECTED</b>\n"
-                   f"🐍 ᴠᴇʀꜱɪᴏɴ: <b>v26 FINAL</b>\n"
+                   f"🐍 ᴠᴇʀꜱɪᴏɴ: <b>v27 FINAL</b>\n"
                    f"👑 ᴀᴅᴍɪɴ: <b>{ADMIN_ID}</b>")
             bot.send_message(cid, txt, parse_mode='HTML',
                 reply_markup=botinfo_kb(), reply_to_message_id=reply_to); return
@@ -2502,7 +2438,7 @@ def process_menu(uid, cid, text, reply_to=None):
         bot.send_message(cid, f"📞 ᴄᴏɴᴛᴀᴄᴛ: {ADMIN_USERNAME}\n\nᴜꜱᴇ /start ꜰᴏʀ ᴍᴇɴᴜ",
             reply_to_message_id=reply_to)
     elif text == "ℹ️ About":
-        about = get_setting("about_text", "") or f"ℹ️ ᴏꜱɪɴᴛ ʙᴏᴛ ᴠ26\n{BOT_USERNAME}"
+        about = get_setting("about_text", "") or f"ℹ️ ᴏꜱɪɴᴛ ʙᴏᴛ ᴠ27\n{BOT_USERNAME}"
         bot.send_message(cid, about, reply_to_message_id=reply_to)
 
 def process_promo(uid, cid, code, reply_to=None):
@@ -2775,20 +2711,36 @@ def cmd_stats(m):
     p, a, r, rev = pay_stats()
     txt = (f"📊 <b>Quick Stats</b>\n\n👥 Users: {total_users()}\n"
            f"👥 Groups: {group_count()}\n🔍 Searches: {total_searches()}\n"
+           f"✅ FJ Verified: {users_col.count_documents({'fj_verified': True})}\n"
            f"💰 Revenue: ₹{rev}\n⏳ Pending: {p}")
     bot.reply_to(m, txt, parse_mode='HTML')
 
 # =================================================================
-#  CHAT JOIN REQUEST
+#  ⭐ CHAT JOIN REQUEST — AUTO-MARK USER AS VERIFIED
 # =================================================================
 @bot.message_handler(content_types=['chat_join_request'])
 def on_join_request(m):
+    """
+    ⭐ v27: When user sends join request to any FJ channel, auto-mark as verified.
+    This means user can use bot immediately (private channels don't block).
+    Admin approves manually in channel.
+    """
     try:
         cid = m.chat.id
         uid = m.from_user.id
         uname = m.from_user.username or "user"
         fname = m.from_user.first_name or ""
         logger.info(f"📥 Join request: {uid} (@{uname}) → {cid}")
+
+        # ⭐ Auto-mark as verified if this is one of our FJ channels
+        try:
+            fj_cids = [c[0] for c in manager.channels] if manager else []
+            if cid in fj_cids:
+                mark_fj_verified(uid)
+                logger.info(f"✅ Auto-marked {uid} as FJ verified (sent request to {cid})")
+        except: pass
+
+        # Notify admin
         try:
             bot.send_message(ADMIN_ID,
                 f"📥 <b>New Channel Join Request</b>\n\n"
@@ -2797,11 +2749,20 @@ def on_join_request(m):
                 f"<i>Open channel → Join Requests → Approve/Reject manually.</i>",
                 parse_mode='HTML')
         except: pass
+
+        # Also notify user that bot has seen their request
+        try:
+            bot.send_message(uid,
+                f"✅ <b>{fancy('join request received')}</b>\n\n"
+                f"ᴀᴅᴍɪɴ ᴊᴀʟᴅ ʜɪ ᴀᴘᴘʀᴏᴠᴇ ᴋᴀʀᴇɢᴀ.\n"
+                f"ᴛᴀʙ ᴛᴀᴋ ᴀᴀᴘ ʙᴏᴛ ᴜꜱᴇ ᴋᴀʀ ꜱᴀᴋᴛᴇ ʜᴀɪɴ!",
+                parse_mode='HTML')
+        except: pass
     except Exception as e:
         logger.error(f"join_request handler error: {e}")
 
 # =================================================================
-#  MENU BUTTONS HANDLER
+#  MENU BUTTONS
 # =================================================================
 ALL_MENU_BUTTONS = [
     "📞 Number To Info","🔒 Username To Info","🆔 Aadhaar To Info","🚗 Vehicle Info",
@@ -2824,20 +2785,20 @@ def menu_btn(m):
     process_menu(uid, cid, m.text, m.message_id)
 
 # =================================================================
-#  TEXT HANDLER — v26 FIXED
+#  ⭐ TEXT HANDLER — v27 PROPER FILTER
 # =================================================================
-@bot.message_handler(content_types=['text'])
+@bot.message_handler(
+    content_types=['text'],
+    func=lambda m: (
+        m.text not in ALL_MENU_BUTTONS and
+        not m.text.startswith('/')
+    )
+)
 def text_handler(m):
     uid = m.from_user.id
     cid = m.chat.id
     text = m.text.strip()
     mid = m.message_id
-
-    # ⭐ CRITICAL FIX: Skip menu buttons and commands (avoid double-processing)
-    if text in ALL_MENU_BUTTONS:
-        return
-    if text.startswith('/'):
-        return
 
     cache_tg_user(m.from_user); upd_last_seen(uid)
     if m.chat.type in ('group', 'supergroup') and group_enabled():
@@ -2854,7 +2815,7 @@ def text_handler(m):
     if not is_admin and is_maintenance() and not bypass:
         bot.send_message(cid, f"🔧 {fancy('maintenance')}", reply_to_message_id=mid); return
 
-    # FJ content-aware pending (only private, non-admin)
+    # FJ pending for non-admin, non-bypass, private chat
     if not bypass and m.chat.type == 'private' and not is_admin:
         _k, _v = classify_input(text)
         if _k == "number": _pending = {"type": "number_search", "data": _v}
@@ -2865,6 +2826,7 @@ def text_handler(m):
         else: _pending = {"type": "start"}
         if not manager.ensure(uid, cid, _pending): return
 
+    # State machine
     if s == 'awaiting_number': states[uid] = {}; process_number(uid, cid, text, mid); return
     if s == 'awaiting_username': states[uid] = {}; process_tg2num(uid, cid, text, mid); return
     if s == 'awaiting_aadhaar': states[uid] = {}; process_aadhaar(uid, cid, text, mid); return
@@ -2884,11 +2846,13 @@ def text_handler(m):
         except: bot.reply_to(m, "❌ Failed")
         states[uid] = {}; return
 
-    if not text.startswith('/') and len(text) == 12 and text.isalnum() and text.isupper():
+    # Promo code check
+    if len(text) == 12 and text.isalnum() and text.isupper():
         try:
             if promo_col.find_one({"code": text}): process_promo(uid, cid, text, mid); return
         except: pass
 
+    # Admin flows
     if is_admin:
         if s == 'ads_input':
             field = st.get('field')
@@ -3133,6 +3097,7 @@ def text_handler(m):
         except: bot.reply_to(m, "❌ Valid amount"); return
         states[uid] = {}; show_amount(uid, cid, a, mid); return
 
+    # Auto-detect only for number/aadhaar/vehicle
     kind, value = classify_input(text)
     if kind == "number":
         if m.chat.type == 'private' and not manager.ensure(uid, cid, {"type":"number_search","data":value}): return
@@ -3300,7 +3265,7 @@ def cb(call):
         p, a, r, rev = pay_stats()
         txt = (f"📊 <b>Detailed Stats</b>\n{div()}\n\n"
                f"<b>Users</b>\n• Total: {total_users()}\n• Banned: {users_col.count_documents({'banned':1})}\n"
-               f"• New 24h: {new_users_24h()}\n• New 7d: {users_col.count_documents({'joined_at':{'$gte':now()-timedelta(days=7)}})}\n"
+               f"• New 24h: {new_users_24h()}\n"
                f"• FJ Verified: {users_col.count_documents({'fj_verified': True})}\n"
                f"• Cached TG: {tg_users_col.count_documents({})}\n\n"
                f"<b>Groups</b>\n• Total: {group_count()}\n\n"
@@ -3651,7 +3616,11 @@ def cb(call):
         cnt = feedback_col.count_documents({}); feedback_col.delete_many({})
         bot.send_message(cid, f"✅ Cleared {cnt} feedback"); safe_ans(call); return
 
-    if d == "force_verify": manager.verify_cb(call); return
+    # ⭐ FJ callbacks
+    if d == "force_verify":
+        if manager: manager.verify_cb(call)
+        return
+
     if d.startswith('fj_'):
         if not is_admin: return
         if d == 'fj_toggle':
@@ -3661,17 +3630,18 @@ def cb(call):
             safe_ans(call); return
         if d == 'fj_list':
             txt = "📋 <b>Force Join Channels</b>\n\n"
-            if manager.channels:
+            if manager.active:
                 txt += "<b>✅ Active (Bot is Admin):</b>\n"
-                for cid_, link in manager.channels:
+                for cid_, link in manager.active:
                     priv = "🔒" if ('+' in link or 'joinchat' in link) else "🌐"
-                    txt += f"{priv} <code>{cid_}</code>\n   {link[:60]}\n"
+                    txt += f"{priv} <code>{cid_}</code>\n   <i>{link[:60]}</i>\n"
             if manager.inactive:
                 txt += "\n<b>⚠️ Inactive (Bot NOT admin):</b>\n"
                 for cid_, link, reason in manager.inactive[:10]:
                     txt += f"❌ <code>{cid_}</code>\n   <i>{reason[:60]}</i>\n"
-            if not manager.channels and not manager.inactive:
-                txt += "<i>No channels. Add one first.</i>"
+            if not manager.channels:
+                txt += "<i>No channels. Add one first.</i>\n\n"
+                txt += "<i>Note: Bot must be admin in channel for FJ to work properly.</i>"
             kb_r = InlineKeyboardMarkup().add(InlineKeyboardButton("🔄 Recheck", callback_data="fj_recheck"))
             try:
                 bot.edit_message_text(txt[:4000], cid, call.message.message_id, parse_mode='HTML', reply_markup=kb_r)
@@ -3696,12 +3666,13 @@ def cb(call):
         if d == 'fj_stats':
             s = manager.stats()
             txt = (f"📊 <b>Force Join Stats</b>\n{div()}\n\n"
+                   f"📢 Total Channels: <b>{s['total']}</b>\n"
+                   f"✅ Active: <b>{s['active']}</b>\n"
+                   f"⚠️ Inactive: <b>{s['inactive']}</b>\n\n"
                    f"🚫 Total Blocks: <b>{s['blocks']}</b>\n"
                    f"✅ Total Verifies: <b>{s['verifies']}</b>\n"
-                   f"📢 Active Channels: <b>{s['active']}</b>\n"
-                   f"⚠️ Inactive Channels: <b>{s['inactive']}</b>\n"
-                   f"🔀 Enabled: <b>{'Yes ✅' if manager.global_enabled else 'No ❌'}</b>\n"
-                   f"👥 Verified Users: <b>{s['verified_users']}</b>")
+                   f"👥 Verified Users: <b>{s['verified_users']}</b>\n\n"
+                   f"🔀 Enabled: <b>{'Yes ✅' if manager.global_enabled else 'No ❌'}</b>")
             bot.send_message(cid, txt, parse_mode='HTML'); safe_ans(call); return
         if d == 'fj_set_msg':
             states[uid] = {'state': 'fj_custom_msg'}
@@ -3718,10 +3689,11 @@ def cb(call):
             bot.send_message(cid, "🔄 Send user_id to reset verify status:"); safe_ans(call); return
         if d == 'fj_recheck':
             manager.reload()
-            safe_ans(call, f"✅ {len(manager.channels)} active, {len(manager.inactive)} inactive", True)
+            safe_ans(call, f"✅ Reloaded", True)
             txt = (f"🔄 <b>Reloaded</b>\n\n"
-                   f"✅ Active: <b>{len(manager.channels)}</b>\n"
-                   f"⚠️ Inactive: <b>{len(manager.inactive)}</b>")
+                   f"✅ Active: <b>{len(manager.active)}</b>\n"
+                   f"⚠️ Inactive: <b>{len(manager.inactive)}</b>\n"
+                   f"📢 Total: <b>{len(manager.channels)}</b>")
             bot.send_message(cid, txt, parse_mode='HTML')
             return
         if d == 'fj_test':
@@ -3730,7 +3702,7 @@ def cb(call):
                 kb_test.add(InlineKeyboardButton(f"📢 Channel {i+1}", url=lk))
             kb_test.add(InlineKeyboardButton("✅ Verify", callback_data="ps_noop"))
             custom = get_setting("fj_custom_msg", "")
-            preview = custom if custom else (f"⚠️ <b>{fancy('please join channels')}</b>\n\nᴊᴏɪɴ ᴋᴀʀᴋᴇ ᴠᴇʀɪꜰʏ ᴅᴀʙᴀᴏ.")
+            preview = custom if custom else (f"⚠️ <b>{fancy('please join channels')}</b>\n\nᴊᴏɪɴ ᴋᴀʀᴋᴇ ᴠᴇʀɪꜰʏ ᴅᴀʙᴀᴏ.\n\n<i>Private channel hai to Request bhejo, phir Verify dabao.</i>")
             bot.send_message(cid, f"🧪 <b>FJ Prompt Preview</b>\n{div()}\n\n{preview}",
                 parse_mode='HTML', reply_markup=kb_test)
             safe_ans(call, "Preview shown"); return
@@ -3960,7 +3932,7 @@ def cb(call):
 if __name__ == "__main__":
     init_db()
     manager = FJManager(bot)
-    logger.info("🚀 Bot v26 FINAL starting...")
+    logger.info("🚀 Bot v27 FINAL starting...")
     init_pyrogram()
     logger.info(f"👑 Admin: {ADMIN_ID}")
     logger.info(f"🛰️ Pyrogram: {'READY' if _pyro_ready else 'DISABLED'}")
@@ -3969,7 +3941,7 @@ if __name__ == "__main__":
     logger.info(f"🚗 Vehicle API: {VEHICLE_URL}")
     logger.info(f"🎁 Welcome Bonus: {WELCOME_BONUS} CREDITS")
     logger.info(f"⏱ Group Auto-Delete: {GROUP_AUTO_DELETE_SECONDS}s")
-    logger.info(f"📢 Force Join: {len(manager.channels)} active, {len(manager.inactive)} inactive")
+    logger.info(f"📢 Force Join: {len(manager.active)} active, {len(manager.inactive)} inactive")
     resume_pending_orders()
 
     try:
