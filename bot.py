@@ -1,13 +1,13 @@
 """
 ================================================================
-  Num Info Bot — v25 FINAL
-  ✅ Force Join DEEP FIX (private channel = verify click pass)
+  Num Info Bot — v26 FINAL
+  ✅ Force Join DEEP FIX (correct Telegram error handling)
+  ✅ DB-persisted verify status (survives restart)
+  ✅ Admin diagnostic: active/inactive channels
   ✅ Group me result + 1hr auto-delete
-  ✅ Private channel join request: NO auto-approve (admin manual)
+  ✅ Private channel: no auto-approve (admin manual)
   ✅ Welcome bonus = 30 credits
-  ✅ Aadhaar + Vehicle Info
-  ✅ Username/TG ID button-only flow
-  ✅ New Admin FJ Features: Stats, Custom Msg, Reset User, Test Prompt
+  ✅ Menu buttons skip in text_handler (no double-processing)
 ================================================================
 """
 
@@ -281,6 +281,7 @@ def get_or_create_user(uid):
             "total_referrals": 0, "bonus_earned": 0,
             "banned": 0, "searches": 0,
             "tries_used": 0, "tries_date": today_str(),
+            "fj_verified": False,
             "joined_at": now(), "last_seen": now()
         }
         users_col.update_one({"user_id": uid}, {"$setOnInsert": doc}, upsert=True)
@@ -365,6 +366,22 @@ def is_banned(uid):
         u = users_col.find_one({"user_id": uid})
         return u and u.get("banned", 0) == 1
     except: return False
+
+# ⭐ NEW: FJ verified persistence
+def is_fj_verified(uid):
+    try:
+        u = users_col.find_one({"user_id": uid}, {"fj_verified": 1})
+        return bool(u and u.get("fj_verified"))
+    except: return False
+
+def mark_fj_verified(uid):
+    try:
+        users_col.update_one({"user_id": uid}, {"$set": {"fj_verified": True}}, upsert=True)
+    except: pass
+
+def unmark_fj_verified(uid):
+    try: users_col.update_one({"user_id": uid}, {"$set": {"fj_verified": False}})
+    except: pass
 
 def ban_user(uid):
     try: users_col.update_one({"user_id": uid}, {"$set": {"banned": 1}}, upsert=True)
@@ -1482,12 +1499,14 @@ def force_kb():
     en = manager.global_enabled if manager else False
     st = "✅ ON" if en else "❌ OFF"
     ch_count = len(manager.channels) if manager else 0
+    in_count = len(manager.inactive) if manager else 0
     kb = InlineKeyboardMarkup(row_width=2)
     kb.row(InlineKeyboardButton(f"🔄 Toggle ({st})", callback_data="fj_toggle"))
     kb.row(InlineKeyboardButton("➕ Add Channel", callback_data="fj_add"),
            InlineKeyboardButton("➖ Remove Channel", callback_data="fj_remove"))
-    kb.row(InlineKeyboardButton(f"📋 List ({ch_count})", callback_data="fj_list"),
+    kb.row(InlineKeyboardButton(f"📋 List ({ch_count}✅/{in_count}⚠️)", callback_data="fj_list"),
            InlineKeyboardButton("📊 FJ Stats", callback_data="fj_stats"))
+    kb.row(InlineKeyboardButton("🔄 Recheck Channels", callback_data="fj_recheck"))
     kb.row(InlineKeyboardButton("✏️ Custom Message", callback_data="fj_set_msg"))
     kb.row(InlineKeyboardButton("🔄 Reset User Verify", callback_data="fj_reset_user"))
     kb.row(InlineKeyboardButton("🧪 Test Prompt Preview", callback_data="fj_test"))
@@ -1696,70 +1715,120 @@ def welcome_txt(uid, uname):
             f"🚗 ᴠᴇʜɪᴄʟᴇ — {get_setting('vehicle_cost',10)}ᴄʀ\n\n{e}")
 
 # =================================================================
-#  FORCE JOIN MANAGER (DEEP LOGIC FIX)
+#  FORCE JOIN MANAGER — v26 DEEP FIX
 # =================================================================
 class FJManager:
+    """
+    v26 FIXED Force Join Manager:
+    - Correct Telegram error string handling ('user not found')
+    - Lenient on bot-side errors (don't block legit users)
+    - DB-persisted verify status (survives bot restart)
+    - Active/Inactive channel tracking with diagnostics
+    """
     def __init__(self, bot):
         self.bot = bot
         self.pending = {}
         self.msg = {}
-        self.verify_clicked = {}   # ⭐ v25 DEEP FIX
-        self.channels = []
+        self.channels = []       # Active: bot is admin
+        self.inactive = []       # Bot can't use (not admin / deleted)
         self.global_enabled = False
         self._load()
 
     def _load(self):
-        try: bi = self.bot.get_me()
-        except:
-            self.channels = []
-            self.global_enabled = False
+        try:
+            bi = self.bot.get_me()
+        except Exception as e:
+            logger.error(f"❌ FJ _load: get_me failed: {e}")
+            self.channels = []; self.inactive = []; self.global_enabled = False
             return
-        valid = []
-        for c in all_channels():
-            try:
-                m = self.bot.get_chat_member(c["channel_id"], bi.id)
-                if m.status in ('administrator', 'creator'):
-                    valid.append((c["channel_id"], c["channel_link"]))
-            except: pass
-        self.channels = valid
-        self.global_enabled = str(get_setting("force_enabled", "1")) == "1"
 
-    def reload(self): self._load()
-    def is_on(self): return self.global_enabled and bool(self.channels)
+        active, inactive = [], []
+        for c in all_channels():
+            cid = c.get("channel_id")
+            link = c.get("channel_link") or ""
+            try:
+                m = self.bot.get_chat_member(cid, bi.id)
+                if m.status in ('administrator', 'creator'):
+                    active.append((cid, link))
+                else:
+                    inactive.append((cid, link, f"bot is {m.status}"))
+                    logger.warning(f"⚠️ FJ: bot is '{m.status}' in {cid} (needs admin)")
+            except Exception as e:
+                err = str(e)
+                inactive.append((cid, link, err[:120]))
+                logger.warning(f"⚠️ FJ: cannot verify {cid}: {err[:150]}")
+
+        self.channels = active
+        self.inactive = inactive
+        self.global_enabled = str(get_setting("force_enabled", "1")) == "1"
+        logger.info(f"✅ FJ loaded: {len(active)} active, {len(inactive)} inactive, enabled={self.global_enabled}")
+
+    def reload(self):
+        self._load()
+
+    def is_on(self):
+        return self.global_enabled and bool(self.channels)
 
     def _is_private(self, link):
         s = str(link or "")
-        return '+' in s or 'joinchat' in s
+        return ('+' in s) or ('joinchat' in s)
 
     def check(self, uid):
+        """
+        Returns None if all OK.
+        Returns list of (cid, link) if user must join.
+
+        PRIVATE channel: skip if user ever clicked Verify (assumes request sent).
+        PUBLIC channel: strict get_chat_member check.
+        """
         if not self.is_on(): return None
         if is_admin_user(uid): return None
 
         missing = []
-        verified = self.verify_clicked.get(uid, False)
+        verified = is_fj_verified(uid)
 
         for cid, link in self.channels:
             is_priv = self._is_private(link)
 
             if is_priv:
-                # ⭐ Private: first time prompt, baad me pass
+                # Private: only block if user never clicked Verify
                 if not verified:
                     missing.append((cid, link))
                 continue
 
-            # ⭐ Public: strict check
+            # Public: strict check
             try:
                 m = self.bot.get_chat_member(cid, uid)
-                if m.status not in ('member', 'administrator', 'creator'):
+                is_in = False
+                if m.status in ('member', 'administrator', 'creator'):
+                    is_in = True
+                elif m.status == 'restricted':
+                    is_in = bool(getattr(m, 'is_member', False))
+                if not is_in:
                     missing.append((cid, link))
             except Exception as e:
                 err = str(e).lower()
-                if 'user_not_participant' in err or 'user not participant' in err:
+                # ⭐ CRITICAL FIX: correct Telegram error strings
+                if ('user not found' in err or
+                    'user_not_participant' in err or
+                    'user not participant' in err or
+                    'participant not found' in err or
+                    'user_not_found' in err):
                     missing.append((cid, link))
-                elif 'peer_id_invalid' in err or 'chat_admin_required' in err:
-                    logger.warning(f"FJ skip {cid}: {e}")
+                    logger.info(f"FJ: user {uid} NOT member of {cid}")
+                # Bot-side errors → skip (don't block legit users)
+                elif ('chat_admin_required' in err or
+                      'chat not found' in err or
+                      'peer_id_invalid' in err or
+                      'chat_not_found' in err or
+                      'not enough rights' in err):
+                    logger.warning(f"FJ skip {cid} (bot-side): {e}")
+                    continue
                 else:
-                    logger.warning(f"FJ err {cid}: {e}")
+                    # Unknown → BLOCK (safer)
+                    logger.warning(f"FJ block {cid} (unknown err): {e}")
+                    missing.append((cid, link))
+
         return missing if missing else None
 
     def ensure(self, uid, cid, pending=None):
@@ -1767,6 +1836,7 @@ class FJManager:
             chat = self.bot.get_chat(cid)
             if chat.type != 'private': return True
         except: return True
+
         if is_admin_user(uid): return True
         if self.check(uid) is None: return True
 
@@ -1800,18 +1870,21 @@ class FJManager:
             s = self.bot.send_message(cid, text, parse_mode='HTML', reply_markup=kb)
             self.msg[uid] = s.message_id
             try:
-                settings_col.update_one(
-                    {"key": "fj_stats_blocks"},
+                settings_col.update_one({"key": "fj_stats_blocks"},
                     {"$inc": {"value": 1}}, upsert=True)
             except: pass
-        except: pass
+            logger.info(f"FJ prompt sent to {uid}")
+        except Exception as e:
+            logger.error(f"FJ prompt send failed: {e}")
         return False
 
     def verify_cb(self, call):
         uid = call.from_user.id
         cid = call.message.chat.id
-        # ⭐ Mark that user clicked verify
-        self.verify_clicked[uid] = True
+
+        # ⭐ Mark in DB (persistent)
+        mark_fj_verified(uid)
+        logger.info(f"FJ verify clicked by {uid}")
 
         if self.check(uid) is None:
             mid = self.msg.pop(uid, None)
@@ -1819,15 +1892,23 @@ class FJManager:
                 try: self.bot.delete_message(cid, mid)
                 except: pass
             p = self.pending.pop(uid, None)
-            if p: self._exec(uid, cid, p, call)
+            if p:
+                self._exec(uid, cid, p, call)
             else:
                 uname = call.from_user.username or "user"
                 self.bot.send_message(cid, welcome_txt(uid, uname),
                     parse_mode='HTML', reply_markup=main_kb(uid))
             try:
-                settings_col.update_one(
-                    {"key": "fj_stats_verifies"},
+                settings_col.update_one({"key": "fj_stats_verifies"},
                     {"$inc": {"value": 1}}, upsert=True)
+            except: pass
+            # Notify admin (info only)
+            try:
+                bot.send_message(ADMIN_ID,
+                    f"✅ <b>FJ Verified</b>\n"
+                    f"👤 @{call.from_user.username or 'user'}\n"
+                    f"🆔 <code>{uid}</code>",
+                    parse_mode='HTML')
             except: pass
             try: self.bot.answer_callback_query(call.id, "✅ Verified!")
             except: pass
@@ -1868,11 +1949,13 @@ class FJManager:
             bi = self.bot.get_me()
             m = self.bot.get_chat_member(cid, bi.id)
             if m.status not in ('administrator', 'creator'):
-                return False, f"Bot is {m.status}"
-        except Exception as e: return False, str(e)
-        if not add_channel_db(cid, link): return False, "Already exists"
+                return False, f"Bot is '{m.status}' — make it admin first"
+        except Exception as e:
+            return False, f"Cannot verify: {str(e)[:80]}"
+        if not add_channel_db(cid, link):
+            return False, "Already exists"
         self.reload()
-        return True, "Added"
+        return True, "Added & Active ✅"
 
     def rm(self, cid):
         if remove_channel_db(cid):
@@ -1884,11 +1967,15 @@ class FJManager:
         try:
             blocks = settings_col.find_one({"key": "fj_stats_blocks"})
             verifies = settings_col.find_one({"key": "fj_stats_verifies"})
+            verified_count = users_col.count_documents({"fj_verified": True})
             return {
                 "blocks": blocks.get("value", 0) if blocks else 0,
                 "verifies": verifies.get("value", 0) if verifies else 0,
+                "verified_users": verified_count,
+                "active": len(self.channels),
+                "inactive": len(self.inactive),
             }
-        except: return {"blocks": 0, "verifies": 0}
+        except: return {"blocks": 0, "verifies": 0, "verified_users": 0, "active": 0, "inactive": 0}
 
 manager = None
 states = {}
@@ -2243,7 +2330,7 @@ def process_menu(uid, cid, text, reply_to=None):
     if text == "👑 ADMIN PANEL":
         if not is_admin:
             bot.send_message(cid, "❌ Admin only", reply_to_message_id=reply_to); return
-        txt = (f"👑 <b>{fancy('admin panel v25')}</b>\n{div()}\n"
+        txt = (f"👑 <b>{fancy('admin panel v26')}</b>\n{div()}\n"
                f"ᴡᴇʟᴄᴏᴍᴇ ᴛᴏ ᴛʜᴇ ᴜʟᴛʀᴀ ᴄᴏɴᴛʀᴏʟ ᴄᴇɴᴛᴇʀ")
         bot.send_message(cid, txt, parse_mode='HTML',
             reply_markup=admin_kb(), reply_to_message_id=reply_to); return
@@ -2329,7 +2416,7 @@ def process_menu(uid, cid, text, reply_to=None):
                    f"⏱ ᴜᴘᴛɪᴍᴇ: <b>{hh}h {mm}m</b>\n"
                    f"🛰️ ᴘʏʀᴏɢʀᴀᴍ: <b>{'✅ READY' if _pyro_ready else '🔴 DISABLED'}</b>\n"
                    f"💾 ᴍᴏɴɢᴏ: <b>✅ CONNECTED</b>\n"
-                   f"🐍 ᴠᴇʀꜱɪᴏɴ: <b>v25 FINAL</b>\n"
+                   f"🐍 ᴠᴇʀꜱɪᴏɴ: <b>v26 FINAL</b>\n"
                    f"👑 ᴀᴅᴍɪɴ: <b>{ADMIN_ID}</b>")
             bot.send_message(cid, txt, parse_mode='HTML',
                 reply_markup=botinfo_kb(), reply_to_message_id=reply_to); return
@@ -2415,7 +2502,7 @@ def process_menu(uid, cid, text, reply_to=None):
         bot.send_message(cid, f"📞 ᴄᴏɴᴛᴀᴄᴛ: {ADMIN_USERNAME}\n\nᴜꜱᴇ /start ꜰᴏʀ ᴍᴇɴᴜ",
             reply_to_message_id=reply_to)
     elif text == "ℹ️ About":
-        about = get_setting("about_text", "") or f"ℹ️ ᴏꜱɪɴᴛ ʙᴏᴛ ᴠ25\n{BOT_USERNAME}"
+        about = get_setting("about_text", "") or f"ℹ️ ᴏꜱɪɴᴛ ʙᴏᴛ ᴠ26\n{BOT_USERNAME}"
         bot.send_message(cid, about, reply_to_message_id=reply_to)
 
 def process_promo(uid, cid, code, reply_to=None):
@@ -2737,7 +2824,7 @@ def menu_btn(m):
     process_menu(uid, cid, m.text, m.message_id)
 
 # =================================================================
-#  TEXT HANDLER
+#  TEXT HANDLER — v26 FIXED
 # =================================================================
 @bot.message_handler(content_types=['text'])
 def text_handler(m):
@@ -2745,6 +2832,13 @@ def text_handler(m):
     cid = m.chat.id
     text = m.text.strip()
     mid = m.message_id
+
+    # ⭐ CRITICAL FIX: Skip menu buttons and commands (avoid double-processing)
+    if text in ALL_MENU_BUTTONS:
+        return
+    if text.startswith('/'):
+        return
+
     cache_tg_user(m.from_user); upd_last_seen(uid)
     if m.chat.type in ('group', 'supergroup') and group_enabled():
         register_group(m.chat.id, m.chat.title, getattr(m.chat, 'username', None))
@@ -2760,7 +2854,8 @@ def text_handler(m):
     if not is_admin and is_maintenance() and not bypass:
         bot.send_message(cid, f"🔧 {fancy('maintenance')}", reply_to_message_id=mid); return
 
-    if not bypass and m.chat.type == 'private':
+    # FJ content-aware pending (only private, non-admin)
+    if not bypass and m.chat.type == 'private' and not is_admin:
         _k, _v = classify_input(text)
         if _k == "number": _pending = {"type": "number_search", "data": _v}
         elif _k == "aadhaar": _pending = {"type": "aadhaar_search", "data": _v}
@@ -2837,7 +2932,9 @@ def text_handler(m):
                        f"🆔 <code>{target_id}</code>\n📛 @{u.get('username','N/A')}\n"
                        f"👋 {u.get('full_name','N/A')}\n💎 Credits: {ud.get('credits',0)}\n"
                        f"🔍 Searches: {ud.get('searches',0)}\n📌 Refs: {ud.get('total_referrals',0)}\n"
-                       f"🚫 Banned: {'Yes' if ud.get('banned') else 'No'}\n📅 Joined: {ud.get('joined_at','?')}")
+                       f"🚫 Banned: {'Yes' if ud.get('banned') else 'No'}\n"
+                       f"✅ FJ Verified: {'Yes' if ud.get('fj_verified') else 'No'}\n"
+                       f"📅 Joined: {ud.get('joined_at','?')}")
                 bot.reply_to(m, txt, parse_mode='HTML')
             except Exception as e: bot.reply_to(m, f"❌ {e}")
             states[uid] = {}; return
@@ -2856,6 +2953,7 @@ def text_handler(m):
                        f"💎 Credits: <b>{ud.get('credits',0)}</b>\n"
                        f"🔍 Searches: {ud.get('searches',0)}\n📌 Refs: {ud.get('total_referrals',0)}\n"
                        f"🎁 Bonus: {ud.get('bonus_earned',0)}\n🚫 Banned: {'Yes' if ud.get('banned') else 'No'}\n"
+                       f"✅ FJ Verified: {'Yes' if ud.get('fj_verified') else 'No'}\n"
                        f"🎯 Tries: {ud.get('tries_used',0)} used\n\n"
                        f"💰 <b>Payments</b>\nTotal Paid: ₹{total_paid}\n"
                        f"Credits Bought: {total_cr}\nCount: {len(pays)}")
@@ -3019,11 +3117,8 @@ def text_handler(m):
         if s == 'fj_reset_user':
             try:
                 tid = int(text.strip())
-                if tid in manager.verify_clicked:
-                    del manager.verify_clicked[tid]
-                    bot.reply_to(m, f"✅ Reset verify for <code>{tid}</code>", parse_mode='HTML')
-                else:
-                    bot.reply_to(m, f"⚠️ User <code>{tid}</code> not in verify list", parse_mode='HTML')
+                unmark_fj_verified(tid)
+                bot.reply_to(m, f"✅ Reset verify for <code>{tid}</code>", parse_mode='HTML')
             except:
                 bot.reply_to(m, "❌ Invalid user_id")
             states[uid] = {}
@@ -3206,6 +3301,7 @@ def cb(call):
         txt = (f"📊 <b>Detailed Stats</b>\n{div()}\n\n"
                f"<b>Users</b>\n• Total: {total_users()}\n• Banned: {users_col.count_documents({'banned':1})}\n"
                f"• New 24h: {new_users_24h()}\n• New 7d: {users_col.count_documents({'joined_at':{'$gte':now()-timedelta(days=7)}})}\n"
+               f"• FJ Verified: {users_col.count_documents({'fj_verified': True})}\n"
                f"• Cached TG: {tg_users_col.count_documents({})}\n\n"
                f"<b>Groups</b>\n• Total: {group_count()}\n\n"
                f"<b>Payments</b>\n• Pending: {p}\n• Approved: {a}\n• Rejected: {r}\n"
@@ -3564,12 +3660,21 @@ def cb(call):
             except: pass
             safe_ans(call); return
         if d == 'fj_list':
-            chs = channel_list()
-            txt = "📋 <b>Channels</b>\n\n" + "\n".join(
-                f"<code>{c['channel_id']}</code> — {c['channel_link']}" for c in chs) if chs else "None"
+            txt = "📋 <b>Force Join Channels</b>\n\n"
+            if manager.channels:
+                txt += "<b>✅ Active (Bot is Admin):</b>\n"
+                for cid_, link in manager.channels:
+                    priv = "🔒" if ('+' in link or 'joinchat' in link) else "🌐"
+                    txt += f"{priv} <code>{cid_}</code>\n   {link[:60]}\n"
+            if manager.inactive:
+                txt += "\n<b>⚠️ Inactive (Bot NOT admin):</b>\n"
+                for cid_, link, reason in manager.inactive[:10]:
+                    txt += f"❌ <code>{cid_}</code>\n   <i>{reason[:60]}</i>\n"
+            if not manager.channels and not manager.inactive:
+                txt += "<i>No channels. Add one first.</i>"
+            kb_r = InlineKeyboardMarkup().add(InlineKeyboardButton("🔄 Recheck", callback_data="fj_recheck"))
             try:
-                bot.edit_message_text(txt, cid, call.message.message_id, parse_mode='HTML',
-                    reply_markup=InlineKeyboardMarkup().add(InlineKeyboardButton("🔙", callback_data="adm_back")))
+                bot.edit_message_text(txt[:4000], cid, call.message.message_id, parse_mode='HTML', reply_markup=kb_r)
             except: pass
             safe_ans(call); return
         if d == 'fj_add':
@@ -3593,9 +3698,10 @@ def cb(call):
             txt = (f"📊 <b>Force Join Stats</b>\n{div()}\n\n"
                    f"🚫 Total Blocks: <b>{s['blocks']}</b>\n"
                    f"✅ Total Verifies: <b>{s['verifies']}</b>\n"
-                   f"📢 Active Channels: <b>{len(manager.channels)}</b>\n"
+                   f"📢 Active Channels: <b>{s['active']}</b>\n"
+                   f"⚠️ Inactive Channels: <b>{s['inactive']}</b>\n"
                    f"🔀 Enabled: <b>{'Yes ✅' if manager.global_enabled else 'No ❌'}</b>\n"
-                   f"👥 Verified Users: <b>{len(manager.verify_clicked)}</b>")
+                   f"👥 Verified Users: <b>{s['verified_users']}</b>")
             bot.send_message(cid, txt, parse_mode='HTML'); safe_ans(call); return
         if d == 'fj_set_msg':
             states[uid] = {'state': 'fj_custom_msg'}
@@ -3610,6 +3716,14 @@ def cb(call):
         if d == 'fj_reset_user':
             states[uid] = {'state': 'fj_reset_user'}
             bot.send_message(cid, "🔄 Send user_id to reset verify status:"); safe_ans(call); return
+        if d == 'fj_recheck':
+            manager.reload()
+            safe_ans(call, f"✅ {len(manager.channels)} active, {len(manager.inactive)} inactive", True)
+            txt = (f"🔄 <b>Reloaded</b>\n\n"
+                   f"✅ Active: <b>{len(manager.channels)}</b>\n"
+                   f"⚠️ Inactive: <b>{len(manager.inactive)}</b>")
+            bot.send_message(cid, txt, parse_mode='HTML')
+            return
         if d == 'fj_test':
             kb_test = InlineKeyboardMarkup(row_width=1)
             for i, (ch, lk) in enumerate(manager.channels[:10]):
@@ -3846,7 +3960,7 @@ def cb(call):
 if __name__ == "__main__":
     init_db()
     manager = FJManager(bot)
-    logger.info("🚀 Bot v25 FINAL starting...")
+    logger.info("🚀 Bot v26 FINAL starting...")
     init_pyrogram()
     logger.info(f"👑 Admin: {ADMIN_ID}")
     logger.info(f"🛰️ Pyrogram: {'READY' if _pyro_ready else 'DISABLED'}")
@@ -3855,6 +3969,7 @@ if __name__ == "__main__":
     logger.info(f"🚗 Vehicle API: {VEHICLE_URL}")
     logger.info(f"🎁 Welcome Bonus: {WELCOME_BONUS} CREDITS")
     logger.info(f"⏱ Group Auto-Delete: {GROUP_AUTO_DELETE_SECONDS}s")
+    logger.info(f"📢 Force Join: {len(manager.channels)} active, {len(manager.inactive)} inactive")
     resume_pending_orders()
 
     try:
