@@ -1,13 +1,14 @@
 """
 ================================================================
-  Num Info Bot — v27 DEEP CLEAN
+  Num Info Bot — v27 DEEP CLEAN (FULL FIXED)
   ✅ text_handler filter (menu button double-processing FIXED)
   ✅ Force Join: proper Telegram error handling
-  ✅ chat_join_request → auto-mark verified
+  ✅ chat_join_request → auto-mark verified (FIXED decorator)
   ✅ DB-persisted FJ status (survives restart)
   ✅ Group result + 1hr auto-delete
   ✅ Welcome bonus = 30 CR
   ✅ Admin panel: active/inactive channels diagnostics
+  ✅ Multi-channel Force Join support
 ================================================================
 """
 
@@ -18,6 +19,7 @@ from datetime import datetime, timedelta
 
 import requests
 import telebot
+import telebot.util
 from telebot.types import (
     InlineKeyboardMarkup, InlineKeyboardButton,
     ReplyKeyboardMarkup, KeyboardButton, BotCommand
@@ -1659,21 +1661,13 @@ def welcome_txt(uid, uname):
 #  FORCE JOIN MANAGER — v27 DEEP CLEAN
 # =================================================================
 class FJManager:
-    """
-    v27 FINAL:
-    - All channels in DB → shown in prompt
-    - Active (bot admin) → strict check
-    - Inactive (bot not admin) → lenient (skip on verify)
-    - Private channel → pass if user clicked Verify OR sent join request
-    - DB-persisted
-    """
     def __init__(self, bot):
         self.bot = bot
         self.pending = {}
         self.msg = {}
-        self.channels = []   # List of (cid, link) — ALL channels for prompt
-        self.active = []     # (cid, link) where bot is admin
-        self.inactive = []   # (cid, link, reason)
+        self.channels = []
+        self.active = []
+        self.inactive = []
         self.global_enabled = False
         self._load()
 
@@ -1693,7 +1687,6 @@ class FJManager:
             cid = c.get("channel_id")
             link = c.get("channel_link") or ""
             all_chs.append((cid, link))
-            # Try to check if bot is admin
             try:
                 m = self.bot.get_chat_member(cid, bi.id)
                 if m.status in ('administrator', 'creator'):
@@ -1706,9 +1699,9 @@ class FJManager:
                 inactive.append((cid, link, err[:100]))
                 logger.warning(f"⚠️ FJ: cannot check {cid}: {err[:150]}")
 
-        self.channels = all_chs      # ALL channels for prompt
-        self.active = active         # Bot is admin — strict
-        self.inactive = inactive     # Bot not admin — lenient
+        self.channels = all_chs
+        self.active = active
+        self.inactive = inactive
         self.global_enabled = str(get_setting("force_enabled", "1")) == "1"
         logger.info(f"✅ FJ: {len(all_chs)} total, {len(active)} active, {len(inactive)} inactive, enabled={self.global_enabled}")
 
@@ -1722,27 +1715,20 @@ class FJManager:
         return ('+' in s) or ('joinchat' in s)
 
     def check(self, uid):
-        """
-        Returns None if all OK.
-        Returns list of (cid, link) if user must join.
-        """
         if not self.is_on(): return None
         if is_admin_user(uid): return None
 
         missing = []
         verified = is_fj_verified(uid)
 
-        # ⭐ STRICT check for ACTIVE channels (bot admin)
         for cid, link in self.active:
             is_priv = self._is_private(link)
 
             if is_priv:
-                # Private: user needs to have clicked Verify (sent request)
                 if not verified:
                     missing.append((cid, link))
                 continue
 
-            # Public: strict get_chat_member
             try:
                 m = self.bot.get_chat_member(cid, uid)
                 status = m.status
@@ -1753,20 +1739,14 @@ class FJManager:
                     missing.append((cid, link))
             except Exception as e:
                 err = str(e).lower()
-                # ⭐ CORRECT Telegram error strings
                 if ('user not found' in err or
                     'user_not_participant' in err or
                     'participant not found' in err or
                     'user_not_found' in err):
                     missing.append((cid, link))
                 else:
-                    # Bot-side error (chat not found, etc.) → skip
                     logger.warning(f"FJ skip {cid}: {e}")
                     continue
-
-        # ⭐ LENIENT check for INACTIVE channels (bot not admin, can't verify)
-        # Only show prompt, but never block on these
-        # (User is trusted to have joined)
 
         return missing if missing else None
 
@@ -1792,7 +1772,6 @@ class FJManager:
         missing = self.check(uid)
         if not missing: return True
 
-        # Build prompt with ALL channel links (active + inactive)
         kb = InlineKeyboardMarkup(row_width=1)
         seen = set()
         idx = 0
@@ -1827,7 +1806,6 @@ class FJManager:
         uid = call.from_user.id
         cid = call.message.chat.id
 
-        # ⭐ Mark in DB (persistent)
         mark_fj_verified(uid)
         logger.info(f"FJ verify clicked by {uid}")
 
@@ -1847,7 +1825,6 @@ class FJManager:
                 settings_col.update_one({"key": "fj_stats_verifies"},
                     {"$inc": {"value": 1}}, upsert=True)
             except: pass
-            # Notify admin
             try:
                 bot.send_message(ADMIN_ID,
                     f"✅ <b>FJ Verified</b>\n"
@@ -1892,7 +1869,6 @@ class FJManager:
             bi = self.bot.get_me()
             m = self.bot.get_chat_member(cid, bi.id)
             if m.status not in ('administrator', 'creator'):
-                # Still add, but warn
                 logger.warning(f"⚠️ Bot is '{m.status}' in {cid} — FJ will be lenient")
         except Exception as e:
             logger.warning(f"⚠️ Cannot verify bot admin: {e}")
@@ -2716,20 +2692,19 @@ def cmd_stats(m):
     bot.reply_to(m, txt, parse_mode='HTML')
 
 # =================================================================
-#  ⭐ CHAT JOIN REQUEST — AUTO-MARK USER AS VERIFIED
+#  ⭐ CHAT JOIN REQUEST — v27 FIXED DECORATOR
 # =================================================================
-@bot.message_handler(content_types=['chat_join_request'])
-def on_join_request(m):
+@bot.chat_join_request_handler(func=lambda r: True)
+def on_join_request(r):
     """
-    ⭐ v27: When user sends join request to any FJ channel, auto-mark as verified.
-    This means user can use bot immediately (private channels don't block).
-    Admin approves manually in channel.
+    v27 FIXED: chat_join_request is NOT a message — use dedicated handler.
+    (Previously used @bot.message_handler(content_types=[...]) — WRONG)
     """
     try:
-        cid = m.chat.id
-        uid = m.from_user.id
-        uname = m.from_user.username or "user"
-        fname = m.from_user.first_name or ""
+        cid = r.chat.id
+        uid = r.from_user.id
+        uname = r.from_user.username or "user"
+        fname = r.from_user.first_name or ""
         logger.info(f"📥 Join request: {uid} (@{uname}) → {cid}")
 
         # ⭐ Auto-mark as verified if this is one of our FJ channels
@@ -2750,7 +2725,7 @@ def on_join_request(m):
                 parse_mode='HTML')
         except: pass
 
-        # Also notify user that bot has seen their request
+        # Notify user
         try:
             bot.send_message(uid,
                 f"✅ <b>{fancy('join request received')}</b>\n\n"
@@ -2815,7 +2790,6 @@ def text_handler(m):
     if not is_admin and is_maintenance() and not bypass:
         bot.send_message(cid, f"🔧 {fancy('maintenance')}", reply_to_message_id=mid); return
 
-    # FJ pending for non-admin, non-bypass, private chat
     if not bypass and m.chat.type == 'private' and not is_admin:
         _k, _v = classify_input(text)
         if _k == "number": _pending = {"type": "number_search", "data": _v}
@@ -2826,7 +2800,6 @@ def text_handler(m):
         else: _pending = {"type": "start"}
         if not manager.ensure(uid, cid, _pending): return
 
-    # State machine
     if s == 'awaiting_number': states[uid] = {}; process_number(uid, cid, text, mid); return
     if s == 'awaiting_username': states[uid] = {}; process_tg2num(uid, cid, text, mid); return
     if s == 'awaiting_aadhaar': states[uid] = {}; process_aadhaar(uid, cid, text, mid); return
@@ -2846,13 +2819,11 @@ def text_handler(m):
         except: bot.reply_to(m, "❌ Failed")
         states[uid] = {}; return
 
-    # Promo code check
     if len(text) == 12 and text.isalnum() and text.isupper():
         try:
             if promo_col.find_one({"code": text}): process_promo(uid, cid, text, mid); return
         except: pass
 
-    # Admin flows
     if is_admin:
         if s == 'ads_input':
             field = st.get('field')
@@ -3097,7 +3068,6 @@ def text_handler(m):
         except: bot.reply_to(m, "❌ Valid amount"); return
         states[uid] = {}; show_amount(uid, cid, a, mid); return
 
-    # Auto-detect only for number/aadhaar/vehicle
     kind, value = classify_input(text)
     if kind == "number":
         if m.chat.type == 'private' and not manager.ensure(uid, cid, {"type":"number_search","data":value}): return
@@ -3616,7 +3586,6 @@ def cb(call):
         cnt = feedback_col.count_documents({}); feedback_col.delete_many({})
         bot.send_message(cid, f"✅ Cleared {cnt} feedback"); safe_ans(call); return
 
-    # ⭐ FJ callbacks
     if d == "force_verify":
         if manager: manager.verify_cb(call)
         return
@@ -3956,7 +3925,11 @@ if __name__ == "__main__":
     except: pass
 
     try:
-        bot.infinity_polling(timeout=60, long_polling_timeout=30)
+        bot.infinity_polling(
+            timeout=60,
+            long_polling_timeout=30,
+            allowed_updates=telebot.util.update_types  # ⭐ FIX: ensure join_request received
+        )
     except KeyboardInterrupt:
         logger.info("Shutting down...")
     except Exception as e:
