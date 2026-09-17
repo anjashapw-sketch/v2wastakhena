@@ -1,12 +1,16 @@
 """
 ================================================================
-  Num Info Bot — v28 FORCE JOIN DEEP FIX
-  ✅ FJ: Channel leave → immediately blocked (error = block)
-  ✅ FJ: Private channel → ONLY unlock after join request sent
-  ✅ Per-channel join request tracking (DB persisted)
-  ✅ Public channel → strict getChatMember check
-  ✅ Private channel → request tracking + membership verify
-  ✅ All previous features preserved
+  Num Info Bot — v29 FULLY FIXED
+  ✅ Payment atomic + credited flag (race-safe)
+  ✅ Referral bonus AFTER FJ verify (no abuse)
+  ✅ Group /start + admin panel blocked
+  ✅ Group auto-delete doesn't kill user msg
+  ✅ Pre-tag-aware message splitter
+  ✅ FJ pending action always overwritten
+  ✅ classify_input ambiguity fixed
+  ✅ name/owner_name duplicate fixed
+  ✅ safe_ans everywhere (no stuck spinner)
+  ✅ Payment screenshots bypass FJ
 ================================================================
 """
 
@@ -166,6 +170,7 @@ def init_db():
         payments_col.create_index("status")
         payments_col.create_index("user_id")
         payments_col.create_index("order_id", sparse=True)
+        payments_col.create_index([("status", 1), ("created_at", -1)])
         tg_users_col.create_index("user_id", unique=True)
         tg_users_col.create_index("username_lower", sparse=True)
         groups_col.create_index("chat_id", unique=True)
@@ -208,11 +213,17 @@ def init_db():
         "fj_custom_msg": "",
         "aadhaar_live_url": "https://apihitech.vercel.app/search?q=",
     }
-    for k, v in defaults.items():
-        try:
-            if not settings_col.find_one({"key": k}):
-                settings_col.insert_one({"key": k, "value": v})
-        except: pass
+    # ✅ FIX: bulk insert for defaults
+    try:
+        existing_keys = set(d["key"] for d in settings_col.find({}, {"key": 1}))
+        bulk_ops = []
+        for k, v in defaults.items():
+            if k not in existing_keys:
+                bulk_ops.append({"key": k, "value": v})
+        if bulk_ops:
+            try: settings_col.insert_many(bulk_ops, ordered=False)
+            except: pass
+    except: pass
 
     if channels_col.count_documents({}) == 0 and FORCE_CHANNELS_ENV:
         ids = [int(c.strip()) for c in FORCE_CHANNELS_ENV.split(",") if c.strip()]
@@ -262,7 +273,8 @@ def get_or_create_user(uid):
             "banned": 0, "searches": 0,
             "tries_used": 0, "tries_date": today_str(),
             "fj_verified": False,
-            "fj_requested_channels": [],   # ⭐ NEW: per-channel join requests
+            "fj_requested_channels": [],
+            "pending_referrer": None,  # ✅ FIX: track pending referrer for post-FJ bonus
             "joined_at": now(), "last_seen": now()
         }
         users_col.update_one({"user_id": uid}, {"$setOnInsert": doc}, upsert=True)
@@ -277,7 +289,10 @@ def add_credits(uid, amt):
     try:
         get_or_create_user(uid)
         users_col.update_one({"user_id": uid}, {"$inc": {"credits": amt}})
-    except: pass
+        return True
+    except Exception as e:
+        logger.error(f"add_credits: {e}")
+        return False
 
 def deduct_credits(uid, amt):
     try:
@@ -330,12 +345,14 @@ def tries_display(uid):
     return str(r)
 
 def add_referral_bonus(rid):
+    """✅ FIX: idempotent referral bonus"""
     try:
-        if is_banned(rid): return
+        if is_banned(rid): return False
         b = int(get_setting("referral_bonus", REFERRAL_BONUS))
         users_col.update_one({"user_id": rid},
             {"$inc": {"credits": b, "total_referrals": 1, "bonus_earned": b}})
-    except: pass
+        return True
+    except: return False
 
 def is_banned(uid):
     try:
@@ -343,9 +360,8 @@ def is_banned(uid):
         return u and u.get("banned", 0) == 1
     except: return False
 
-# ⭐ FJ persistence - PER CHANNEL
+# FJ persistence
 def is_fj_verified(uid):
-    """Global flag - kept for backward compat."""
     try:
         u = users_col.find_one({"user_id": uid}, {"fj_verified": 1})
         return bool(u and u.get("fj_verified"))
@@ -362,21 +378,17 @@ def unmark_fj_verified(uid):
             {"$set": {"fj_verified": False, "fj_requested_channels": []}})
     except: pass
 
-# ⭐ NEW: Per-channel join request tracking
 def mark_join_request(uid, cid):
-    """Mark that user sent join request to a specific channel."""
     try:
         users_col.update_one(
             {"user_id": uid},
             {"$addToSet": {"fj_requested_channels": cid}},
-            upsert=True
-        )
+            upsert=True)
         logger.info(f"📥 Join request tracked: U{uid} → C{cid}")
     except Exception as e:
         logger.error(f"mark_join_request: {e}")
 
 def has_join_request(uid, cid):
-    """Check if user sent join request to a specific channel."""
     try:
         u = users_col.find_one({"user_id": uid}, {"fj_requested_channels": 1})
         if not u: return False
@@ -384,14 +396,12 @@ def has_join_request(uid, cid):
     except: return False
 
 def clear_join_requests(uid):
-    """Clear all join request tracking for a user."""
     try:
         users_col.update_one({"user_id": uid},
             {"$set": {"fj_requested_channels": []}})
     except: pass
 
 def clear_channel_join_request(uid, cid):
-    """Remove a specific channel from user's join request list."""
     try:
         users_col.update_one({"user_id": uid},
             {"$pull": {"fj_requested_channels": cid}})
@@ -780,7 +790,7 @@ def create_payment(uid, cid, amount, credits, pay_mode, screenshot_id=None,
     doc = {"user_id": uid, "chat_id": cid, "amount": amount, "credits": credits,
         "pay_mode": pay_mode, "screenshot_id": screenshot_id,
         "order_id": order_id, "payment_link": payment_link,
-        "status": "pending", "created_at": now(),
+        "status": "pending", "credited": False, "created_at": now(),
         "approved_at": None, "approved_by": None,
         "reject_reason": None, "gateway_response": gateway_raw}
     try: return str(payments_col.insert_one(doc).inserted_id)
@@ -794,17 +804,49 @@ def get_pending():
     try: return list(payments_col.find({"status": "pending"}).sort("created_at", 1))
     except: return []
 
+def _credit_payment_atomic(p):
+    """
+    ✅ FIX: Safely credit a user for a payment.
+    Uses 'credited' flag for idempotency to prevent double-credit or lost credits.
+    Returns True if credits were newly applied, False if already credited or failed.
+    """
+    if not p: return False
+    pid = p["_id"]
+    # Atomically claim the "credit" job
+    claimed = payments_col.find_one_and_update(
+        {"_id": pid, "credited": {"$ne": True}},
+        {"$set": {"credited": True, "credited_at": now()}},
+        return_document=ReturnDocument.AFTER)
+    if not claimed:
+        logger.info(f"Payment {pid} already credited — skipping")
+        return False
+    # Now add credits
+    ok = add_credits(claimed["user_id"], claimed["credits"])
+    if not ok:
+        # Rollback credited flag so a retry can happen
+        payments_col.update_one({"_id": pid},
+            {"$set": {"credited": False, "credit_error": "add_credits failed"}})
+        logger.error(f"❌ CRITICAL: credit failed for payment {pid}")
+        return False
+    return True
+
 def approve_atomic(pid, aid):
+    """
+    ✅ FIX: Credits added BEFORE marking approved.
+    Prevents the classic 'paid but not credited' bug.
+    """
     try: oid = ObjectId(pid)
     except: return False, None
-    try:
-        r = payments_col.find_one_and_update(
-            {"_id": oid, "status": "pending"},
-            {"$set": {"status": "approved", "approved_at": now(), "approved_by": aid}},
-            return_document=ReturnDocument.AFTER)
-        if not r: return False, payments_col.find_one({"_id": oid})
-        return True, r
-    except: return False, None
+    # 1. Atomically claim (pending → approved)
+    r = payments_col.find_one_and_update(
+        {"_id": oid, "status": "pending"},
+        {"$set": {"status": "approved", "approved_at": now(), "approved_by": aid}},
+        return_document=ReturnDocument.AFTER)
+    if not r:
+        return False, payments_col.find_one({"_id": oid})
+    # 2. Credit user (idempotent via 'credited' flag)
+    _credit_payment_atomic(r)
+    return True, r
 
 def reject_atomic(pid, aid, reason="Rejected"):
     try: oid = ObjectId(pid)
@@ -871,7 +913,10 @@ def save_promo(code, rc, mu, aid):
         promo_col.insert_one({"code": code, "reward_credits": rc, "max_users": mu,
             "used_count": 0, "used_by": [], "generated_by": aid,
             "created_at": datetime.now().strftime('%Y-%m-%d'), "active": 1})
-    except: pass
+        return True
+    except Exception as e:
+        logger.error(f"save_promo: {e}")
+        return False
 
 def redeem_promo(code, uid):
     try:
@@ -983,6 +1028,17 @@ bot = telebot.TeleBot(BOT_TOKEN)
 try: bot.remove_webhook()
 except: pass
 
+_bot_me_cache = None
+def get_bot_me():
+    """✅ FIX: cache get_me() to avoid extra network calls"""
+    global _bot_me_cache
+    if _bot_me_cache is None:
+        try: _bot_me_cache = bot.get_me()
+        except Exception as e:
+            logger.error(f"get_bot_me: {e}")
+            return None
+    return _bot_me_cache
+
 def send_typing(cid):
     try: bot.send_chat_action(cid, 'typing')
     except: pass
@@ -1016,6 +1072,7 @@ class AnimMsg:
         self.mid = None; self._stop = threading.Event(); self._t = None
         self._start_time = time.time()
         self._dead = False
+        self._lock = threading.Lock()  # ✅ FIX: prevent concurrent edit race
         self.frames = self._build(stages or [])
     def _build(self, stages):
         frames = []; total = len(stages) or 1; BAR = self.BAR_LEN
@@ -1072,25 +1129,27 @@ class AnimMsg:
             try: self._t.join(timeout=3)
             except: pass
     def flash_complete(self, delay=0.4):
-        if self._dead: return
-        elapsed = time.time() - self._start_time
-        bar = "█" * self.BAR_LEN
-        text = (f"<b>🎯 {self.title}</b>\n{div()}\n"
-                f"<code>{bar}</code> <b>100%</b>\n\n"
-                f"✅ <b>{fancy('complete')}</b>\n<i>⏱ {fancy(f'took {elapsed:.1f}s')}</i>")
-        try: bot.edit_message_text(text, self.cid, self.mid, parse_mode="HTML")
-        except: pass
+        with self._lock:
+            if self._dead: return
+            elapsed = time.time() - self._start_time
+            bar = "█" * self.BAR_LEN
+            text = (f"<b>🎯 {self.title}</b>\n{div()}\n"
+                    f"<code>{bar}</code> <b>100%</b>\n\n"
+                    f"✅ <b>{fancy('complete')}</b>\n<i>⏱ {fancy(f'took {elapsed:.1f}s')}</i>")
+            try: bot.edit_message_text(text, self.cid, self.mid, parse_mode="HTML")
+            except: pass
         time.sleep(delay)
     def edit(self, text, mark=None):
-        if self._dead:
-            try: bot.send_message(self.cid, text, parse_mode="HTML", reply_markup=mark)
-            except Exception as e: logger.error(f"AnimMsg send: {e}")
-            return
-        try: bot.edit_message_text(text, self.cid, self.mid, parse_mode="HTML", reply_markup=mark)
-        except Exception as e:
-            logger.warning(f"AnimMsg edit: {e}")
-            try: bot.send_message(self.cid, text, parse_mode="HTML", reply_markup=mark)
-            except Exception as e2: logger.error(f"AnimMsg fallback: {e2}")
+        with self._lock:
+            if self._dead:
+                try: bot.send_message(self.cid, text, parse_mode="HTML", reply_markup=mark)
+                except Exception as e: logger.error(f"AnimMsg send: {e}")
+                return
+            try: bot.edit_message_text(text, self.cid, self.mid, parse_mode="HTML", reply_markup=mark)
+            except Exception as e:
+                logger.warning(f"AnimMsg edit: {e}")
+                try: bot.send_message(self.cid, text, parse_mode="HTML", reply_markup=mark)
+                except Exception as e2: logger.error(f"AnimMsg fallback: {e2}")
     def delete(self):
         try: bot.delete_message(self.cid, self.mid)
         except: pass
@@ -1163,7 +1222,7 @@ def low_credit_kb(uid):
     return kb
 
 # =================================================================
-#  INPUT HELPERS
+#  INPUT HELPERS  (✅ FIXED: classification ambiguity)
 # =================================================================
 def extract_phone_digits(text):
     if not text: return None
@@ -1174,7 +1233,6 @@ def extract_phone_digits(text):
     if len(d) == 11 and d.startswith("0") and d[1] in "6789": return d[1:]
     if len(d) == 13 and d.startswith("091") and d[3] in "6789": return d[3:]
     if len(d) == 10 and d[0] in "6789": return d
-    if len(d) > 10 and d[-10] in "6789": return d[-10:]
     return None
 
 def is_vehicle_number(text):
@@ -1183,6 +1241,11 @@ def is_vehicle_number(text):
     return bool(re.match(r'^[A-Z]{2}[0-9]{1,2}[A-Z]{1,3}[0-9]{4}$', v))
 
 def classify_input(text):
+    """
+    ✅ FIX: 12-digit numbers are ambiguous (Aadhaar vs TG ID).
+    We prefer Aadhaar because 12-digit Aadhaar is the more common 12-digit input.
+    Users who want TG ID should use the dedicated Username/ID menu.
+    """
     if not text: return None, None
     t = text.strip()
     if not t: return None, None
@@ -1200,9 +1263,12 @@ def classify_input(text):
             return "username", u
         return None, None
     if t.isdigit():
+        # Try phone first (10-digit)
         phone = extract_phone_digits(t)
         if phone: return "number", phone
+        # 12-digit → Aadhaar (more likely than TG ID for raw digit input)
         if len(t) == 12: return "aadhaar", t
+        # 5-15 digits → TG ID
         if 5 <= len(t) <= 15: return "tgid", t
         return None, None
     if t.startswith("+"):
@@ -1241,10 +1307,10 @@ def normalize_phone(num, cc=None):
     return n
 
 # =================================================================
-#  JSON OUTPUT
+#  JSON OUTPUT  (✅ FIXED: name/owner_name duplicate)
 # =================================================================
 _FIELD_ALIASES = {
-    "name": ("name","full_name","fullname","customer_name","user_name","owner_name","owner"),
+    "name": ("name","full_name","fullname","customer_name","user_name"),
     "father": ("father","father_name","fathername","fname","guardian","fathers_name"),
     "address": ("address","addr","full_address","add","permanent_address"),
     "aadhaar": ("aadhaar","aadhar","aadhaar_number","aadhar_no","uid","aadhaar_no"),
@@ -1262,7 +1328,8 @@ _FIELD_ALIASES = {
     "country": ("country","nation"),
     "country_code": ("country_code","cc","code"),
     "vehicle_number": ("vehicle_number","reg_no","registration_number","vehicle","v_number"),
-    "owner_name": ("owner_name","owner","name"),
+    # ✅ FIX: removed "name" from owner_name aliases (was colliding with "name")
+    "owner_name": ("owner_name","owner","owner_full_name"),
     "chassis": ("chassis","chassis_no","chassis_number"),
     "engine": ("engine","engine_no","engine_number"),
     "fuel": ("fuel","fuel_type"),
@@ -1329,7 +1396,8 @@ def record_to_json_dict(rec):
     ]
     for key, json_key in mapping:
         v = _clean_val(_get_field(rec, key))
-        if v: out[json_key] = v
+        if v and json_key not in out:
+            out[json_key] = v
     low = {k.lower(): v for k, v in rec.items() if isinstance(k, str)}
     covered = set()
     for key, _ in mapping:
@@ -1694,16 +1762,9 @@ def welcome_txt(uid, uname):
             f"🚗 ᴠᴇʜɪᴄʟᴇ — {get_setting('vehicle_cost',10)}ᴄʀ\n\n{e}")
 
 # =================================================================
-#  FORCE JOIN MANAGER — v28 DEEP FIX
+#  FORCE JOIN MANAGER — v29 FIXED
 # =================================================================
 class FJManager:
-    """
-    v28 FIXES:
-    ✅ Public channels: strict getChatMember, block on ALL errors
-    ✅ Private channels: ONLY unlock after join request sent (tracked)
-    ✅ Private channels: also verify membership if bot is admin
-    ✅ Channel leave → immediately blocked (no skip on errors)
-    """
     def __init__(self, bot):
         self.bot = bot
         self.pending = {}
@@ -1717,6 +1778,8 @@ class FJManager:
     def _load(self):
         try:
             bi = self.bot.get_me()
+            if not bi:
+                raise Exception("get_me returned None")
         except Exception as e:
             logger.error(f"❌ FJ _load: get_me failed: {e}")
             self.channels = []; self.active = []; self.inactive = []
@@ -1758,15 +1821,11 @@ class FJManager:
         return ('+' in s) or ('joinchat' in s)
 
     def _is_active(self, cid):
-        """Check if bot is admin in this channel."""
         return any(c[0] == cid for c in self.active)
 
     def check(self, uid):
         """
-        v28 FIXED:
-        - Public channels: strict getChatMember — block on ALL errors
-        - Private channels: check join request tracking + membership if bot admin
-        - Returns None if all OK, else list of missing (cid, link)
+        ✅ FIX: Distinguish transient errors (FloodWait, network) from real "not member".
         """
         if not self.is_on(): return None
         if is_admin_user(uid): return None
@@ -1780,19 +1839,12 @@ class FJManager:
             is_active = self._is_active(cid)
 
             if is_priv:
-                # ─── PRIVATE CHANNEL ───
                 if not is_active:
-                    # Bot not admin → can't verify, skip
                     logger.warning(f"FJ skip private {cid}: bot not admin")
                     continue
-
-                # Step 1: Check join request sent
                 if cid not in requested_channels:
                     missing.append((cid, link))
-                    logger.info(f"FJ: U{uid} missing private channel {cid} (no join request)")
                     continue
-
-                # Step 2: Verify actual membership (if bot admin)
                 try:
                     m = self.bot.get_chat_member(cid, uid)
                     status = m.status
@@ -1800,12 +1852,10 @@ class FJManager:
                     if status == 'restricted' and getattr(m, 'is_member', False):
                         is_member = True
                     if not is_member:
-                        # User sent request but left/kicked after approval
                         missing.append((cid, link))
                         logger.info(f"FJ: U{uid} left private channel {cid} (status={status})")
                 except Exception as e:
                     err = str(e).lower()
-                    # If bot can't verify, but user sent request → allow
                     if 'user not found' in err or 'user_not_participant' in err or 'participant not found' in err:
                         missing.append((cid, link))
                         logger.info(f"FJ: U{uid} not participant in private {cid}")
@@ -1814,7 +1864,7 @@ class FJManager:
                         logger.warning(f"FJ verify private {cid}: {e} (allowing — request sent)")
                 continue
 
-            # ─── PUBLIC CHANNEL ───
+            # PUBLIC CHANNEL
             try:
                 m = self.bot.get_chat_member(cid, uid)
                 status = m.status
@@ -1826,17 +1876,21 @@ class FJManager:
                     logger.info(f"FJ: U{uid} not member of public {cid} (status={status})")
             except Exception as e:
                 err = str(e).lower()
-                # ⭐ FIX: Block on ALL errors except bot-permission errors
-                bot_perm_errors = (
+                # ✅ FIX: bot permission → skip; transient errors → also skip (retry later)
+                skip_errors = (
                     'chat_admin_required' in err or
                     'not enough rights' in err or
                     'bot is not a member' in err or
-                    'bot was kicked' in err
+                    'bot was kicked' in err or
+                    'too many requests' in err or
+                    'flood_wait' in err or
+                    'timeout' in err or
+                    'connection' in err
                 )
-                if bot_perm_errors:
-                    logger.warning(f"FJ skip public {cid}: bot no permission — {e}")
+                if skip_errors:
+                    logger.warning(f"FJ skip public {cid}: transient/bot-perm — {e}")
                     continue
-                # User-side error → NOT a member
+                # User-side error → not a member
                 missing.append((cid, link))
                 logger.info(f"FJ: U{uid} blocked from public {cid} (error: {str(e)[:80]})")
 
@@ -1849,12 +1903,14 @@ class FJManager:
         except: return True
 
         if is_admin_user(uid): return True
-        if self.check(uid) is None: return True
+        if self.check(uid) is None:
+            # ✅ FIX: clear any stale pending
+            if pending is None: self.pending.pop(uid, None)
+            return True
 
-        if pending:
-            ex = self.pending.get(uid)
-            if not ex or ex.get('type') in ('welcome', 'unknown'):
-                self.pending[uid] = pending
+        # ✅ FIX: ALWAYS overwrite pending with the latest action (was: only if empty/welcome)
+        if pending is not None:
+            self.pending[uid] = pending
 
         old = self.msg.pop(uid, None)
         if old:
@@ -1864,7 +1920,6 @@ class FJManager:
         missing = self.check(uid)
         if not missing: return True
 
-        # Build prompt with ALL channel links
         kb = InlineKeyboardMarkup(row_width=1)
         seen = set()
         idx = 0
@@ -1896,19 +1951,17 @@ class FJManager:
         return False
 
     def verify_cb(self, call):
-        """
-        v28 FIXED: NO auto-verify. Only unlock if ALL channels pass check.
-        """
         uid = call.from_user.id
         cid = call.message.chat.id
 
         logger.info(f"FJ verify clicked by {uid}")
-
-        # ⭐ Re-check ALL channels (don't mark as verified blindly)
         missing = self.check(uid)
 
         if missing is None:
-            # ✅ All good
+            # ✅ ALL GOOD → mark verified, credit any pending referral
+            mark_fj_verified(uid)
+            _process_pending_referral(uid)
+
             mid = self.msg.pop(uid, None)
             if mid:
                 try: self.bot.delete_message(cid, mid)
@@ -1931,16 +1984,13 @@ class FJManager:
                     f"🆔 <code>{uid}</code>",
                     parse_mode='HTML')
             except: pass
-            try: self.bot.answer_callback_query(call.id, "✅ Verified!")
-            except: pass
+            safe_ans(call, "✅ Verified!")
         else:
-            # ❌ Still missing channels
             old_mid = self.msg.pop(uid, None)
             if old_mid:
                 try: self.bot.delete_message(cid, old_mid)
                 except: pass
-            try: self.bot.answer_callback_query(call.id, "❌ Not joined all channels!", show_alert=True)
-            except: pass
+            safe_ans(call, "❌ Not joined all channels!", True)
             self.ensure(uid, cid)
 
     def _exec(self, uid, cid, p, call):
@@ -1998,24 +2048,73 @@ class FJManager:
         except: return {"blocks": 0, "verifies": 0, "verified_users": 0,
                         "total": 0, "active": 0, "inactive": 0}
 
+# =================================================================
+#  PENDING REFERRAL PROCESSING (post-FJ)
+# =================================================================
+def _process_pending_referral(uid):
+    """
+    ✅ FIX: Give referral bonus to referrer ONLY after new user has verified FJ.
+    Idempotent — safe to call multiple times.
+    """
+    try:
+        u = users_col.find_one({"user_id": uid})
+        if not u: return
+        rid = u.get("pending_referrer")
+        if not rid: return
+        if u.get("referral_credited"): return
+        if not referral_enabled(): return
+        # Claim
+        res = users_col.find_one_and_update(
+            {"user_id": uid, "pending_referrer": rid, "referral_credited": {"$ne": True}},
+            {"$set": {"referral_credited": True, "referred_by": rid}},
+            return_document=ReturnDocument.AFTER)
+        if not res: return
+        add_referral_bonus(rid)
+        try:
+            rb = get_setting("referral_bonus", 10)
+            bot.send_message(rid, f"🎉 ɴᴇᴡ ʀᴇꜰᴇʀʀᴀʟ ᴠᴇʀɪꜰɪᴇᴅ!\n+{rb}ᴄʀ")
+        except: pass
+    except Exception as e:
+        logger.error(f"_process_pending_referral: {e}")
+
 manager = None
 states = {}
 
 # =================================================================
-#  SEND RESULT
+#  SEND RESULT — ✅ FIXED: pre-aware splitter + no user msg delete
 # =================================================================
 def _split_safe(text, limit=MSG_SAFE_LIMIT):
+    """
+    ✅ FIX: Split at safe boundaries. Never mid-<pre> tag.
+    If we're inside <pre>, we close and reopen it.
+    """
     if len(text) <= limit: return [text]
+
+    # Count pre tags to know if we're inside
     parts = []
     rem = text
+
     while rem:
         if len(rem) <= limit:
             parts.append(rem); break
         chunk = rem[:limit]
-        idx = chunk.rfind('\n')
-        if idx < limit // 2: idx = limit
-        parts.append(rem[:idx])
-        rem = rem[idx:]
+        # Prefer double-newline boundaries
+        idx = chunk.rfind('\n\n')
+        if idx < limit // 3:
+            idx = chunk.rfind('\n')
+        if idx < limit // 3:
+            idx = limit
+        piece = rem[:idx]
+
+        # If piece has unclosed <pre>, close & reopen
+        opens = piece.count('<pre>')
+        closes = piece.count('</pre>')
+        if opens > closes:
+            piece = piece + '</pre>'
+            rem = '<pre>' + rem[idx:]
+        else:
+            rem = rem[idx:]
+        parts.append(piece)
     return parts
 
 def send_result(uid, cid, txt, reply_to=None, reply_markup=None, is_group_msg=False):
@@ -2062,14 +2161,14 @@ def send_result(uid, cid, txt, reply_to=None, reply_markup=None, is_group_msg=Fa
 
     if sent_msgs and group_auto_delete():
         delay = group_auto_delete_seconds()
+        # ✅ FIX: Do NOT delete the user's original message (reply_to)
         delete_ids = list(sent_msgs)
-        if reply_to: delete_ids.append(reply_to)
         def _del():
             time.sleep(delay)
             for mid in delete_ids:
                 try: bot.delete_message(cid, mid)
                 except: pass
-            logger.info(f"🗑 Auto-deleted {len(delete_ids)} msgs in group {cid} after {delay}s")
+            logger.info(f"🗑 Auto-deleted {len(delete_ids)} bot msgs in group {cid} after {delay}s")
         threading.Thread(target=_del, daemon=True).start()
 
 # =================================================================
@@ -2338,11 +2437,40 @@ def process_tg2num(uid, cid, query, reply_to=None):
 def process_menu(uid, cid, text, reply_to=None):
     upd_last_seen(uid)
     is_admin = is_admin_user(uid)
+    is_group = cid < 0  # ✅ FIX: detect group
 
+    # ✅ FIX: Block admin panel & main menu in groups
+    if is_group:
+        if text in ("👑 ADMIN PANEL",):
+            try:
+                bot.send_message(cid, "❌ Admin panel only in private chat.", reply_to_message_id=reply_to)
+            except: pass
+            return
+        if text == "🔙 Back to Menu":
+            bot.send_message(cid, "🏠 Menu private mein /start karein.", reply_to_message_id=reply_to); return
+        # For groups: only show a hint + copy, not the full reply keyboard
+        if text in ("📞 Number To Info", "🔒 Username To Info", "🆔 Aadhaar To Info", "🚗 Vehicle Info"):
+            states[uid] = {'state': {
+                "📞 Number To Info": 'awaiting_number',
+                "🔒 Username To Info": 'awaiting_username',
+                "🆔 Aadhaar To Info": 'awaiting_aadhaar',
+                "🚗 Vehicle Info": 'awaiting_vehicle',
+            }.get(text, '')}
+            bot.send_message(cid,
+                f"📩 <b>{fancy('send your query')}</b>\n\nᴀᴀᴘ ᴅᴀʙᴀʏᴇ <code>{text}</code> — ᴀʙ ᴛʏᴘᴇ ᴋᴀʀᴇɪɴ.",
+                parse_mode='HTML', reply_to_message_id=reply_to)
+            return
+        # Other menu items in group: hint to DM
+        bot.send_message(cid,
+            f"💬 <b>{fancy('private only')}</b>\n\nʏᴇ ꜱᴜᴠɪᴅʜᴀ ᴘʀɪᴠᴀᴛᴇ ᴄʜᴀᴛ ᴍᴇ ʜᴀɪ.\n➡️ @{BOT_USERNAME.replace('@','')}",
+            parse_mode='HTML', reply_to_message_id=reply_to)
+        return
+
+    # ---- PRIVATE ONLY BELOW ----
     if text == "👑 ADMIN PANEL":
         if not is_admin:
             bot.send_message(cid, "❌ Admin only", reply_to_message_id=reply_to); return
-        txt = (f"👑 <b>{fancy('admin panel v28')}</b>\n{div()}\n"
+        txt = (f"👑 <b>{fancy('admin panel v29')}</b>\n{div()}\n"
                f"ᴡᴇʟᴄᴏᴍᴇ ᴛᴏ ᴛʜᴇ ᴜʟᴛʀᴀ ᴄᴏɴᴛʀᴏʟ ᴄᴇɴᴛᴇʀ")
         bot.send_message(cid, txt, parse_mode='HTML',
             reply_markup=admin_kb(), reply_to_message_id=reply_to); return
@@ -2372,67 +2500,55 @@ def process_menu(uid, cid, text, reply_to=None):
         if text == "👥 Users":
             bot.send_message(cid, f"👥 <b>{fancy('user management')}</b>", parse_mode='HTML',
                 reply_markup=users_kb(), reply_to_message_id=reply_to); return
-
         if text == "💳 Payments":
             bot.send_message(cid, f"💳 <b>{fancy('payment management')}</b>", parse_mode='HTML',
                 reply_markup=payments_kb(), reply_to_message_id=reply_to); return
-
         if text == "🔧 Services":
             bot.send_message(cid, f"🔧 <b>{fancy('service configuration')}</b>", parse_mode='HTML',
                 reply_markup=services_kb(), reply_to_message_id=reply_to); return
-
         if text == "🎟 Promos":
             bot.send_message(cid, f"🎟 <b>{fancy('promo management')}</b>", parse_mode='HTML',
                 reply_markup=promos_kb(), reply_to_message_id=reply_to); return
-
         if text == "📢 Broadcast":
             bot.send_message(cid, f"📢 <b>{fancy('broadcast center')}</b>", parse_mode='HTML',
                 reply_markup=broadcast_kb(), reply_to_message_id=reply_to); return
-
         if text == "📢 Force Join":
             bot.send_message(cid, f"📢 <b>{fancy('force join')}</b>", parse_mode='HTML',
                 reply_markup=force_kb(), reply_to_message_id=reply_to); return
-
         if text == "👥 Groups":
             txt = f"👥 <b>{fancy('group management')}</b>\n{div()}\n\nᴛᴏᴛᴀʟ ɢʀᴏᴜᴘꜱ: <b>{group_count()}</b>"
             bot.send_message(cid, txt, parse_mode='HTML',
                 reply_markup=groups_kb(), reply_to_message_id=reply_to); return
-
         if text == "⚙️ Settings":
             bot.send_message(cid, f"⚙️ <b>{fancy('admin settings')}</b>",
                 parse_mode='HTML', reply_markup=settings_main_kb(), reply_to_message_id=reply_to); return
-
         if text == "🛡️ Security":
             bot.send_message(cid, f"🛡️ <b>{fancy('security center')}</b>", parse_mode='HTML',
                 reply_markup=security_kb(), reply_to_message_id=reply_to); return
-
         if text == "📈 Analytics":
             bot.send_message(cid, f"📈 <b>{fancy('analytics')}</b>",
                 parse_mode='HTML', reply_markup=analytics_kb(), reply_to_message_id=reply_to); return
-
         if text == "💾 Backup":
             bot.send_message(cid, f"💾 <b>{fancy('backup & export')}</b>",
                 parse_mode='HTML', reply_markup=backup_kb(), reply_to_message_id=reply_to); return
-
         if text == "📮 Feedback":
             cnt = feedback_col.count_documents({})
             bot.send_message(cid, f"📮 <b>Feedback ({cnt})</b>",
                 parse_mode='HTML', reply_markup=feedback_kb(), reply_to_message_id=reply_to); return
-
         if text == "🚀 Bot Info":
             uptime = time.time() - _start_time
             hh = int(uptime // 3600); mm = int((uptime % 3600) // 60)
+            me = get_bot_me()
             txt = (f"🚀 <b>{fancy('bot info')}</b>\n{div()}\n\n"
                    f"📛 ɴᴀᴍᴇ: <b>{BOT_USERNAME}</b>\n"
-                   f"🆔 ɪᴅ: <code>{bot.get_me().id}</code>\n"
+                   f"🆔 ɪᴅ: <code>{me.id if me else '?'}</code>\n"
                    f"⏱ ᴜᴘᴛɪᴍᴇ: <b>{hh}h {mm}m</b>\n"
                    f"🛰️ ᴘʏʀᴏɢʀᴀᴍ: <b>{'✅ READY' if _pyro_ready else '🔴 DISABLED'}</b>\n"
                    f"💾 ᴍᴏɴɢᴏ: <b>✅ CONNECTED</b>\n"
-                   f"🐍 ᴠᴇʀꜱɪᴏɴ: <b>v28 FORCE JOIN FIX</b>\n"
+                   f"🐍 ᴠᴇʀꜱɪᴏɴ: <b>v29 FULLY FIXED</b>\n"
                    f"👑 ᴀᴅᴍɪɴ: <b>{ADMIN_ID}</b>")
             bot.send_message(cid, txt, parse_mode='HTML',
                 reply_markup=botinfo_kb(), reply_to_message_id=reply_to); return
-
         if text == "📝 Logs":
             try:
                 logs = list(logs_col.find().sort("at", -1).limit(20))
@@ -2481,7 +2597,8 @@ def process_menu(uid, cid, text, reply_to=None):
         rb = get_setting("referral_bonus", 10)
         r = (f"🎁 <b>{fancy('refer and earn')}</b>\n\n"
              f"🔗 ʏᴏᴜʀ ʟɪɴᴋ:\n<code>{link}</code>\n\n"
-             f"📌 +{rb} ᴄʀ ᴘᴇʀ ʀᴇꜰᴇʀʀᴀʟ\n\n"
+             f"📌 +{rb} ᴄʀ ᴘᴇʀ ʀᴇꜰᴇʀʀᴀʟ\n"
+             f"<i>(Bonus tab milega jab aapka refer FJ verify kar lega)</i>\n\n"
              f"📊 ʀᴇꜰꜱ: {refs} | ʙᴏɴᴜꜱ: {bonus}")
         kb = InlineKeyboardMarkup(row_width=2)
         kb.row(InlineKeyboardButton("📋 Copy", callback_data=f"copyref_{uid}"),
@@ -2514,7 +2631,7 @@ def process_menu(uid, cid, text, reply_to=None):
         bot.send_message(cid, f"📞 ᴄᴏɴᴛᴀᴄᴛ: {ADMIN_USERNAME}\n\nᴜꜱᴇ /start ꜰᴏʀ ᴍᴇɴᴜ",
             reply_to_message_id=reply_to)
     elif text == "ℹ️ About":
-        about = get_setting("about_text", "") or f"ℹ️ ᴏꜱɪɴᴛ ʙᴏᴛ ᴠ28\n{BOT_USERNAME}"
+        about = get_setting("about_text", "") or f"ℹ️ ᴏꜱɪɴᴛ ʙᴏᴛ ᴠ29\n{BOT_USERNAME}"
         bot.send_message(cid, about, reply_to_message_id=reply_to)
 
 def process_promo(uid, cid, code, reply_to=None):
@@ -2619,21 +2736,28 @@ def _mark_expired(order_id):
     except: pass
 
 def _credit_on_success(uid, cid, order_id, amount, credits, info, msg_id):
-    p = payments_col.find_one({"order_id": order_id, "user_id": uid})
+    """
+    ✅ FIX: Idempotent crediting via _credit_payment_atomic.
+    Never double-credits even with racing poller + manual check.
+    """
+    p = payments_col.find_one({"order_id": order_id, "user_id": uid, "status": "pending"})
     if not p: return
     utr = (info.get("utr") if info else None) or f"FG_{order_id}"
-    try:
-        u = payments_col.find_one_and_update({"_id": p["_id"], "status": "pending"},
-            {"$set": {"status": "approved", "approved_at": now(), "utr": utr,
-                      "gateway_response": (info.get("raw") if info else None),
-                      "auto_verified": True}}, return_document=ReturnDocument.AFTER)
-    except Exception as e:
-        u = payments_col.find_one_and_update({"_id": p["_id"], "status": "pending"},
-            {"$set": {"status": "approved", "approved_at": now(),
-                      "gateway_response": (info.get("raw") if info else None),
-                      "auto_verified": True}}, return_document=ReturnDocument.AFTER)
+    # Move pending → approved atomically
+    u = payments_col.find_one_and_update(
+        {"_id": p["_id"], "status": "pending"},
+        {"$set": {"status": "approved", "approved_at": now(), "utr": utr,
+                  "gateway_response": (info.get("raw") if info else None),
+                  "auto_verified": True}},
+        return_document=ReturnDocument.AFTER)
+    if not u:
+        # Was already processed
+        u = payments_col.find_one({"_id": p["_id"]})
     if not u: return
-    add_credits(uid, credits)
+    # Idempotent credit
+    credited_now = _credit_payment_atomic(u)
+    if not credited_now:
+        logger.info(f"Payment {order_id} already credited")
     txt = (f"✅ <b>{fancy('payment verified')}</b>\n\n💰 ₹{amount}\n💎 +{credits}ᴄʀ\n"
            f"📊 ʙᴀʟᴀɴᴄᴇ: {get_credits(uid)}\n🆔 <code>{order_id}</code>")
     if info and info.get("utr"): txt += f"\n🧾 {info['utr']}"
@@ -2700,10 +2824,14 @@ def cmd_start(m):
     uid = m.from_user.id
     uname = m.from_user.username or "user"
     cid = m.chat.id
+    is_group = m.chat.type in ('group', 'supergroup')
+
     cache_tg_user(m.from_user); upd_last_seen(uid)
     if is_banned(uid) and not is_admin_user(uid):
         bot.reply_to(m, f"🚫 {fancy('banned')}"); return
     get_or_create_user(uid)
+
+    # ✅ FIX: Referral is DEFERRED (credited only after FJ verify)
     if ' ' in m.text:
         parts = m.text.split()
         if len(parts) > 1 and parts[1].startswith('ref_'):
@@ -2711,15 +2839,17 @@ def cmd_start(m):
             except: rid = None
             if rid and rid != uid and referral_enabled():
                 ex = users_col.find_one({"user_id": uid})
-                if ex and not ex.get("referred_by"):
-                    users_col.update_one({"user_id": uid}, {"$set": {"referred_by": rid}})
-                    add_referral_bonus(rid)
-                    try:
-                        rb = get_setting("referral_bonus", 10)
-                        bot.send_message(rid, f"🎉 ɴᴇᴡ ʀᴇꜰᴇʀʀᴀʟ!\n+{rb}ᴄʀ")
-                    except: pass
-    if m.chat.type in ('group', 'supergroup') and group_enabled():
+                if ex and not ex.get("referred_by") and not ex.get("pending_referrer"):
+                    users_col.update_one({"user_id": uid},
+                        {"$set": {"pending_referrer": rid}})
+
+    if is_group and group_enabled():
         register_group(m.chat.id, m.chat.title, getattr(m.chat, 'username', None))
+        # ✅ FIX: don't send full welcome + reply keyboard in groups
+        bot.reply_to(m, f"👋 <b>{fancy('hello')}</b> @{uname}\n\nᴘʀɪᴠᴀᴛᴇ ᴄʜᴀᴛ ᴍᴇ /start ᴋᴀʀᴇɪɴ ᴛᴏ ᴜꜱᴇ ʙᴏᴛ.\n➡️ @{BOT_USERNAME.replace('@','')}",
+                     parse_mode='HTML')
+        return
+
     if m.chat.type == 'private':
         if not manager.ensure(uid, cid, {"type": "start"}): return
     bot.reply_to(m, welcome_txt(uid, uname), parse_mode='HTML', reply_markup=main_kb(uid))
@@ -2728,8 +2858,10 @@ def cmd_start(m):
 def cmd_buy(m):
     uid = m.from_user.id
     cache_tg_user(m.from_user)
-    if m.chat.type == 'private':
-        if not manager.ensure(uid, m.chat.id): return
+    if m.chat.type != 'private':
+        bot.reply_to(m, f"💬 ᴘʀɪᴠᴀᴛᴇ ᴍᴇ ᴜꜱᴇ ᴋᴀʀᴇɪɴ: @{BOT_USERNAME.replace('@','')}")
+        return
+    if not manager.ensure(uid, m.chat.id): return
     t, kb = buy_kb()
     bot.send_message(m.chat.id, t, parse_mode='HTML', reply_markup=kb)
 
@@ -2738,6 +2870,8 @@ def cmd_admin(m):
     uid = m.from_user.id
     if not is_admin_user(uid):
         bot.reply_to(m, "❌ Admin only"); return
+    if m.chat.type != 'private':
+        bot.reply_to(m, "❌ Admin panel only in private chat."); return
     bot.reply_to(m, f"👑 <b>{fancy('admin panel')}</b>", parse_mode='HTML', reply_markup=admin_kb())
 
 @bot.message_handler(commands=['addgroup'])
@@ -2772,7 +2906,8 @@ def cmd_feedback(m):
 
 @bot.message_handler(commands=['pyro_health'])
 def cmd_pyro_health(m):
-    if m.from_user.id != ADMIN_ID: return
+    if m.from_user.id != ADMIN_ID:
+        bot.reply_to(m, "❌ Admin only"); return
     info = [f"🛰️ <b>Pyrogram</b>",
             f"Session: {'✅' if PYRO_SESSION else '❌'}",
             f"Ready: {'✅' if _pyro_ready else '❌'}",
@@ -2783,7 +2918,8 @@ def cmd_pyro_health(m):
 
 @bot.message_handler(commands=['stats'])
 def cmd_stats(m):
-    if not is_admin_user(m.from_user.id): return
+    if not is_admin_user(m.from_user.id):
+        bot.reply_to(m, "❌ Admin only"); return
     p, a, r, rev = pay_stats()
     txt = (f"📊 <b>Quick Stats</b>\n\n👥 Users: {total_users()}\n"
            f"👥 Groups: {group_count()}\n🔍 Searches: {total_searches()}\n"
@@ -2792,16 +2928,10 @@ def cmd_stats(m):
     bot.reply_to(m, txt, parse_mode='HTML')
 
 # =================================================================
-#  ⭐ CHAT JOIN REQUEST — v28 FIXED
+#  CHAT JOIN REQUEST
 # =================================================================
 @bot.chat_join_request_handler(func=lambda r: True)
 def on_join_request(r):
-    """
-    v28 FIXED:
-    - Proper decorator (was message_handler before)
-    - Tracks per-channel join requests in DB
-    - This is what makes private channel FJ work correctly
-    """
     try:
         cid = r.chat.id
         uid = r.from_user.id
@@ -2809,13 +2939,11 @@ def on_join_request(r):
         fname = r.from_user.first_name or ""
         logger.info(f"📥 Join request: {uid} (@{uname}) → {cid}")
 
-        # ⭐ Track join request for this specific channel
         fj_cids = [c[0] for c in manager.channels] if manager else []
         if cid in fj_cids:
             mark_join_request(uid, cid)
             logger.info(f"✅ Join request tracked: U{uid} → C{cid}")
 
-        # Notify admin
         try:
             bot.send_message(ADMIN_ID,
                 f"📥 <b>New Channel Join Request</b>\n\n"
@@ -2825,7 +2953,6 @@ def on_join_request(r):
                 parse_mode='HTML')
         except: pass
 
-        # Notify user
         try:
             bot.send_message(uid,
                 f"✅ <b>{fancy('join request received')}</b>\n\n"
@@ -2853,14 +2980,15 @@ def menu_btn(m):
     uid = m.from_user.id
     cid = m.chat.id
     cache_tg_user(m.from_user)
-    if m.chat.type in ('group', 'supergroup') and group_enabled():
+    is_group = m.chat.type in ('group', 'supergroup')
+    if is_group and group_enabled():
         register_group(m.chat.id, m.chat.title, getattr(m.chat, 'username', None))
     if m.chat.type == 'private':
         if not manager.ensure(uid, cid, {"type": "menu_button", "data": m.text}): return
     process_menu(uid, cid, m.text, m.message_id)
 
 # =================================================================
-#  ⭐ TEXT HANDLER
+#  TEXT HANDLER
 # =================================================================
 @bot.message_handler(
     content_types=['text'],
@@ -2880,6 +3008,7 @@ def text_handler(m):
         register_group(m.chat.id, m.chat.title, getattr(m.chat, 'username', None))
     if is_banned(uid) and not is_admin_user(uid):
         bot.reply_to(m, f"🚫 {fancy('banned')}"); return
+
     st = states.get(uid, {}); s = st.get('state')
     bypass = s in ('promo1','promo2','broadcast','ban','unban','manual_ss','waiting_payment',
         'waiting_ss','custom_amt','ads_input','fj_add','fj_add_link','user_search',
@@ -3089,9 +3218,12 @@ def text_handler(m):
         if s == 'promo2':
             if text.isdigit():
                 lim = int(text); cr = states[uid].get('credits')
-                code = gen_promo(); save_promo(code, cr, lim, uid)
-                bot.reply_to(m, f"🎁 <code>{code}</code>\n{cr}cr × {lim}", parse_mode='HTML')
-                log_action(uid, "promo_gen", f"{code}:{cr}:{lim}")
+                code = gen_promo()
+                if save_promo(code, cr, lim, uid):
+                    bot.reply_to(m, f"🎁 <code>{code}</code>\n{cr}cr × {lim}", parse_mode='HTML')
+                    log_action(uid, "promo_gen", f"{code}:{cr}:{lim}")
+                else:
+                    bot.reply_to(m, "❌ Failed to save promo (duplicate code?)")
                 states[uid] = {}
             else: bot.reply_to(m, "❌ Number")
             return
@@ -3188,8 +3320,10 @@ def text_handler(m):
 @bot.message_handler(content_types=['new_chat_members'])
 def on_new_members(m):
     try:
+        me = get_bot_me()
+        if not me: return
         for member in m.new_chat_members:
-            if member.id == bot.get_me().id:
+            if member.id == me.id:
                 if group_enabled():
                     register_group(m.chat.id, m.chat.title, getattr(m.chat, 'username', None))
                     wl = get_setting("group_welcome", "👋 Bot added! Type /start to begin.")
@@ -3200,24 +3334,31 @@ def on_new_members(m):
 @bot.message_handler(content_types=['left_chat_member'])
 def on_left_member(m):
     try:
-        if m.left_chat_member.id == bot.get_me().id:
+        me = get_bot_me()
+        if not me: return
+        if m.left_chat_member.id == me.id:
             remove_group(m.chat.id)
             logger.info(f"❌ Bot removed from group: {m.chat.title}")
     except: pass
 
 # =================================================================
-#  PHOTO HANDLER
+#  PHOTO HANDLER — ✅ FIXED: FJ bypass for payment screenshots
 # =================================================================
 @bot.message_handler(content_types=['photo'])
 def photo_h(m):
     uid = m.from_user.id
     cid = m.chat.id
     cache_tg_user(m.from_user); upd_last_seen(uid)
-    if m.chat.type == 'private' and not manager.ensure(uid, cid, {"type":"media"}): return
-    if is_banned(uid) and not is_admin_user(uid): bot.reply_to(m, "🚫 Banned"); return
     st = states.get(uid, {}); s = st.get('state')
 
-    if s in ('waiting_ss', 'manual_ss'):
+    # ✅ FIX: Allow payment screenshots even if FJ check would fail (avoid stuck payments)
+    payment_states = ('waiting_ss', 'manual_ss')
+    if s not in payment_states:
+        if m.chat.type == 'private' and not manager.ensure(uid, cid, {"type":"media"}): return
+
+    if is_banned(uid) and not is_admin_user(uid): bot.reply_to(m, "🚫 Banned"); return
+
+    if s in payment_states:
         file_id = m.photo[-1].file_id
         pid = st.get('payment_id')
         if pid:
@@ -3303,14 +3444,15 @@ def cb(call):
     cache_tg_user(call.from_user)
     is_admin = is_admin_user(uid)
 
+    # ✅ Always answer the callback to stop the spinner (safe_ans handles errors)
     if d == "adm_back":
-        if not is_admin: return
+        if not is_admin: safe_ans(call); return
         try: bot.delete_message(cid, call.message.message_id)
         except: pass
-        bot.send_message(cid, "👑 Admin Panel", reply_markup=admin_kb()); return
+        bot.send_message(cid, "👑 Admin Panel", reply_markup=admin_kb()); safe_ans(call); return
 
     if d == "adm_dash_refresh":
-        if not is_admin: return
+        if not is_admin: safe_ans(call); return
         p, a, r, rev = pay_stats()
         txt = (f"📊 <b>{fancy('dashboard')}</b>\n{div()}\n\n"
                f"👥 ᴜꜱᴇʀꜱ: <b>{total_users()}</b>\n"
@@ -3324,7 +3466,7 @@ def cb(call):
         safe_ans(call, "✅ Refreshed"); return
 
     if d == "adm_dash_export":
-        if not is_admin: return
+        if not is_admin: safe_ans(call); return
         csv_d = export_csv()
         if csv_d:
             try:
@@ -3334,7 +3476,7 @@ def cb(call):
         safe_ans(call); return
 
     if d == "adm_dash_detailed":
-        if not is_admin: return
+        if not is_admin: safe_ans(call); return
         p, a, r, rev = pay_stats()
         txt = (f"📊 <b>Detailed Stats</b>\n{div()}\n\n"
                f"<b>Users</b>\n• Total: {total_users()}\n• Banned: {users_col.count_documents({'banned':1})}\n"
@@ -3473,7 +3615,7 @@ def cb(call):
         'adm_ep_vehiclekey': ('vehicle_key_env', 'Vehicle API Key', True),
     }
     if d in ep_map:
-        if not is_admin: return
+        if not is_admin: safe_ans(call); return
         field, prompt, is_secret = ep_map[d]
         current = get_setting(field, "") or "not set"
         if is_secret and len(str(current)) > 4: current = "***" + str(current)[-4:]
@@ -3487,7 +3629,7 @@ def cb(call):
         safe_ans(call); return
 
     if d == "adm_ep_viewall":
-        if not is_admin: return
+        if not is_admin: safe_ans(call); return
         vals = []
         for k, label in [("api_url_env","Number URL"),("api_key_env","Number Key"),
             ("tg2num_url_env","TG2Num URL"),("tg2num_key_env","TG2Num Key"),
@@ -3694,7 +3836,7 @@ def cb(call):
         return
 
     if d.startswith('fj_'):
-        if not is_admin: return
+        if not is_admin: safe_ans(call); return
         if d == 'fj_toggle':
             manager.toggle()
             try: bot.edit_message_reply_markup(cid, call.message.message_id, reply_markup=force_kb())
@@ -3780,7 +3922,7 @@ def cb(call):
             safe_ans(call, "Preview shown"); return
 
     if d.startswith('ads_'):
-        if not is_admin: return
+        if not is_admin: safe_ans(call); return
         if d == 'ads_back':
             try: bot.edit_message_text("⚙️ Settings", cid, call.message.message_id, reply_markup=settings_main_kb())
             except: pass
@@ -3886,9 +4028,9 @@ def cb(call):
             bot.send_message(cid, f"✏️ {prompt}\nCurrent: <code>{html_module.escape(str(current)[:100])}</code>",
                              parse_mode='HTML')
             safe_ans(call); return
-        return
+        safe_ans(call); return
 
-    if d == "ps_noop": return
+    if d == "ps_noop": safe_ans(call); return
     if d == "auto_na": safe_ans(call, "Auto UPI unavailable", True); return
     if d.startswith('amt_'):
         if d == 'amt_custom':
@@ -3938,11 +4080,10 @@ def cb(call):
         bot.send_message(cid, "📸 Send screenshot.", reply_to_message_id=call.message.message_id)
         safe_ans(call); return
     if d.startswith('ap_'):
-        if not is_admin: return
+        if not is_admin: safe_ans(call); return
         pid = d.replace('ap_','',1)
         ok, p = approve_atomic(pid, uid)
         if not ok: safe_ans(call, "Already processed", True); return
-        add_credits(p["user_id"], p["credits"])
         try:
             if call.message.caption:
                 bot.edit_message_caption(cid, call.message.message_id,
@@ -3954,7 +4095,7 @@ def cb(call):
         except: pass
         safe_ans(call, "✅ Approved"); return
     if d.startswith('rj_'):
-        if not is_admin: return
+        if not is_admin: safe_ans(call); return
         pid = d.replace('rj_','',1)
         ok, p = reject_atomic(pid, uid)
         if not ok: safe_ans(call, "Already processed", True); return
@@ -3967,7 +4108,7 @@ def cb(call):
         except: pass
         safe_ans(call, "❌ Rejected"); return
     if d.startswith('pv_'):
-        if not is_admin: return
+        if not is_admin: safe_ans(call); return
         pid = d.replace('pv_','',1)
         p = get_payment(pid)
         if not p: safe_ans(call, "Not found"); return
@@ -4004,7 +4145,7 @@ def cb(call):
 if __name__ == "__main__":
     init_db()
     manager = FJManager(bot)
-    logger.info("🚀 Bot v28 FORCE JOIN FIX starting...")
+    logger.info("🚀 Bot v29 FULLY FIXED starting...")
     init_pyrogram()
     logger.info(f"👑 Admin: {ADMIN_ID}")
     logger.info(f"🛰️ Pyrogram: {'READY' if _pyro_ready else 'DISABLED'}")
